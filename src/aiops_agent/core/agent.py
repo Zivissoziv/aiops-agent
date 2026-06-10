@@ -7,6 +7,8 @@
 3. LLM 返回文本 → 输出
 4. LLM 返回工具调用 → 执行工具 → 结果反馈给 LLM → 回到 2
 5. 达到最大轮次或 LLM 返回纯文本 → 结束
+
+支持可选的 Memory 模块管理对话历史。
 """
 
 import json
@@ -15,6 +17,7 @@ from typing import Generator
 
 from ..config import Config
 from ..llm import BaseLLM
+from ..memory import Memory
 from ..tools import ToolRegistry
 
 
@@ -34,21 +37,30 @@ class Agent:
         config: Config,
         llm: BaseLLM,
         tool_registry: ToolRegistry,
+        memory: Memory | None = None,
     ):
         self.config = config
         self.llm = llm
         self.tool_registry = tool_registry
+        self.memory = memory
 
     def _build_messages(
         self,
         history: list[dict],
         user_input: str,
     ) -> list[dict]:
-        """构建完整的消息列表。"""
+        """构建完整的消息列表（无 memory 的向后兼容路径）。"""
         return [
             {"role": "system", "content": self.config.system_prompt},
             *history,
             {"role": "user", "content": user_input},
+        ]
+
+    def _build_messages_from_memory(self) -> list[dict]:
+        """从 memory 构建消息列表。"""
+        return [
+            {"role": "system", "content": self.config.system_prompt},
+            *self.memory.get_messages(),
         ]
 
     def run(
@@ -60,7 +72,7 @@ class Agent:
 
         Args:
             user_input: 用户输入
-            history: 历史消息列表
+            history: 历史消息列表（仅在无 memory 时使用）
 
         Yields:
             供 UI 展示的事件
@@ -68,8 +80,14 @@ class Agent:
         Returns:
             更新后的消息历史
         """
-        history = list(history) if history else []
-        messages = self._build_messages(history, user_input)
+        # 选择消息构建路径
+        if self.memory is not None:
+            self.memory.add_message({"role": "user", "content": user_input})
+            messages = self._build_messages_from_memory()
+        else:
+            history = list(history) if history else []
+            messages = self._build_messages(history, user_input)
+
         tool_defs = self.tool_registry.get_openai_tool_defs()
         tool_defs = tool_defs or None
 
@@ -95,6 +113,10 @@ class Agent:
                 ]
             messages.append(assistant_msg)
 
+            # 记忆路径: 同步添加消息到 memory
+            if self.memory is not None:
+                self.memory.add_message(assistant_msg)
+
             # 如果有文本回复，输出给用户
             if response.content:
                 yield AgentEvent(
@@ -102,7 +124,7 @@ class Agent:
                     content=response.content,
                 )
 
-            # 如果没有工具调用，结束
+            # 如果没有工具调用，结束本轮
             if not response.tool_calls:
                 break
 
@@ -131,6 +153,10 @@ class Agent:
                 }
                 messages.append(tool_result_msg)
 
+                # 记忆路径: 同步添加工具结果到 memory
+                if self.memory is not None:
+                    self.memory.add_message(tool_result_msg)
+
                 display_output = result.error if not result.success else result.output
                 yield AgentEvent(
                     type="tool_result",
@@ -148,4 +174,8 @@ class Agent:
             )
 
         yield AgentEvent(type="done", content="")
+
+        # 返回更新后的历史
+        if self.memory is not None:
+            return self.memory.get_messages()
         return messages[1:]
