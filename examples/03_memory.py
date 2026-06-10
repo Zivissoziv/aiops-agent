@@ -11,62 +11,32 @@ examples/03_memory.py — 记忆管理
   python examples/03_memory.py
 
 前置条件:
-  已完成 01_simple_chat.py，理解基础对话流程
+  已完成 01_simple_chat.py 和 02_tool_calling.py，理解基础对话和工具调用
 
 核心概念:
   - Token 预算: LLM 上下文窗口有限，需要管理历史消息的 token 开销
   - 滑动窗口: 只保留最近 N 条消息，超出则丢弃
   - 摘要: 用 LLM 对旧消息做摘要，用摘要替换原文
   - 权衡: 滑窗简单但丢失上下文，摘要保留上下文但增加 LLM 调用
+
+提示:
+  本示例使用 _common.py 中的共用函数（load_config, estimate_tokens, call_llm），
+  这些函数在 01_simple_chat.py 中首次引入。
 """
 
-import os
-import json
-from pathlib import Path
-from dotenv import load_dotenv
 from openai import OpenAI
 
+from _common import load_config, estimate_tokens, call_llm
+
 
 # ============================================================
-# 第一步: 加载配置（同前两个示例）
+# 第一步: 加载配置（同前两个示例，使用 _common.py）
 # ============================================================
-env_path = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(env_path)
-
-api_key = os.getenv("OPENAI_API_KEY", "")
-base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-if not api_key or len(api_key) < 10:
-    print("❌ 请在项目根目录的 .env 文件中配置 OPENAI_API_KEY")
-    exit(1)
-
-client = OpenAI(api_key=api_key, base_url=base_url)
+config = load_config()
+model = config["model"]
+client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
 
 SYSTEM_PROMPT = "你是一个 AIOps 运维助手。请简洁地回答运维相关问题。"
-
-
-def estimate_tokens(messages: list[dict]) -> int:
-    """近似估算 token 数（字符数 // 4）。"""
-    total = 0
-    for m in messages:
-        content = m.get("content", "")
-        if isinstance(content, str):
-            total += len(content)
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and "text" in block:
-                    total += len(block["text"])
-    return total // 4
-
-
-def call_llm(messages: list[dict]) -> str:
-    """调用 LLM 并返回回复内容。"""
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-    )
-    return response.choices[0].message.content or ""
 
 
 # ============================================================

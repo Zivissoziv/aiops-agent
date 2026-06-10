@@ -21,35 +21,26 @@ examples/01_simple_chat.py — 基础 LLM 对话
 """
 
 import os
-from pathlib import Path
-from dotenv import load_dotenv
 from openai import OpenAI
+
+from _common import load_config, estimate_tokens
 
 
 # ============================================================
 # 第一步: 加载配置
 # ============================================================
-# 从项目根目录加载 .env 文件
-env_path = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(env_path)
-
-# 读取配置（支持 DeepSeek / OpenAI / 其他兼容接口）
-api_key = os.getenv("OPENAI_API_KEY", "")
-base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-if not api_key or len(api_key) < 10:
-    print("❌ 请在项目根目录的 .env 文件中配置 OPENAI_API_KEY")
-    print("   参考 .env.example 文件")
-    exit(1)
+# load_config() 自动从项目根目录加载 .env 文件
+# 如果 API Key 未配置会直接提示退出
+config = load_config()
+model = config["model"]
 
 
 # ============================================================
 # 第二步: 创建 LLM 客户端
 # ============================================================
 # OpenAI SDK 兼容所有 OpenAI 格式的 API
-# 只需修改 base_url 即可切换不同的 LLM 提供商
-client = OpenAI(api_key=api_key, base_url=base_url)
+# 只需修改 .env 中的 base_url 即可切换不同的 LLM 提供商
+client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
 
 
 # ============================================================
@@ -120,5 +111,4 @@ while True:
     messages.append({"role": "assistant", "content": full_response})
 
     # 简单的 token 消耗提示（近似估算）
-    total_chars = sum(len(m.get("content", "")) for m in messages if m.get("content"))
-    print(f"  [当前历史约 {total_chars // 4} tokens，共 {len(messages)} 条消息]")
+    print(f"  [当前历史约 {estimate_tokens(messages)} tokens，共 {len(messages)} 条消息]")

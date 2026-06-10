@@ -25,27 +25,18 @@ examples/02_tool_calling.py — 工具调用
 
 import json
 import subprocess
-import os
-from pathlib import Path
-from dotenv import load_dotenv
 from openai import OpenAI
+
+from _common import load_config
 
 
 # ============================================================
 # 第一步: 加载配置（同上一个示例）
 # ============================================================
-env_path = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(env_path)
-
-api_key = os.getenv("OPENAI_API_KEY", "")
-base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-if not api_key or len(api_key) < 10:
-    print("❌ 请在项目根目录的 .env 文件中配置 OPENAI_API_KEY")
-    exit(1)
-
-client = OpenAI(api_key=api_key, base_url=base_url)
+# load_config() 来自 _common.py，自动加载 .env 并验证 API Key
+config = load_config()
+model = config["model"]
+client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
 
 
 # ============================================================
