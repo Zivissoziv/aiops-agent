@@ -39,43 +39,32 @@ class ShellTool(Tool):
             "required": ["command"],
         }
 
+    @staticmethod
+    def _decode(data: bytes | None) -> str:
+        """解码命令输出，自动尝试 utf-8 和 gbk。"""
+        if not data:
+            return ""
+        for enc in ["utf-8", "gbk", "gb18030"]:
+            try:
+                return data.decode(enc)
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        return data.decode("utf-8", errors="replace")
+
     def execute(self, command: str, timeout: int = 30) -> ToolResult:
         start = time.time()
         try:
-            # 先试试 utf-8，失败时用系统编码
-            encoding = "utf-8"
-            try:
-                result = subprocess.run(
-                    command,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    encoding=encoding,
-                )
-            except UnicodeDecodeError:
-                # 回退：不用 text=True，手动解码
-                result = subprocess.run(
-                    command,
-                    shell=True,
-                    capture_output=True,
-                    timeout=timeout,
-                )
-                # 尝试多种编码解码
-                for enc in ["gbk", "utf-8", "gb18030"]:
-                    try:
-                        result.stdout = result.stdout.decode(enc, errors="replace")
-                        result.stderr = result.stderr.decode(enc, errors="replace")
-                        break
-                    except (UnicodeDecodeError, AttributeError):
-                        continue
-                else:
-                    result.stdout = result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
-                    result.stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
+            # 统一用二进制模式，手动解码（避免 Windows text=True 的编码问题）
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                timeout=timeout,
+            )
             elapsed = time.time() - start
 
-            stdout = result.stdout or ""
-            stderr = result.stderr or ""
+            stdout = self._decode(result.stdout)
+            stderr = self._decode(result.stderr)
 
             if result.returncode == 0:
                 output = stdout.strip() or "(命令执行成功，无输出)"
