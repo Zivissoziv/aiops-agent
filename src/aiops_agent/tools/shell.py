@@ -42,26 +42,53 @@ class ShellTool(Tool):
     def execute(self, command: str, timeout: int = 30) -> ToolResult:
         start = time.time()
         try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            # 先试试 utf-8，失败时用系统编码
+            encoding = "utf-8"
+            try:
+                result = subprocess.run(
+                    command,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    encoding=encoding,
+                )
+            except UnicodeDecodeError:
+                # 回退：不用 text=True，手动解码
+                result = subprocess.run(
+                    command,
+                    shell=True,
+                    capture_output=True,
+                    timeout=timeout,
+                )
+                # 尝试多种编码解码
+                for enc in ["gbk", "utf-8", "gb18030"]:
+                    try:
+                        result.stdout = result.stdout.decode(enc, errors="replace")
+                        result.stderr = result.stderr.decode(enc, errors="replace")
+                        break
+                    except (UnicodeDecodeError, AttributeError):
+                        continue
+                else:
+                    result.stdout = result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
+                    result.stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
             elapsed = time.time() - start
 
+            stdout = result.stdout or ""
+            stderr = result.stderr or ""
+
             if result.returncode == 0:
+                output = stdout.strip() or "(命令执行成功，无输出)"
                 return ToolResult(
                     success=True,
-                    output=result.stdout.strip() if result.stdout.strip() else "(命令执行成功，无输出)",
+                    output=output,
                     execution_time=elapsed,
                 )
             else:
                 return ToolResult(
                     success=True,
-                    output=result.stdout.strip() if result.stdout.strip() else "",
-                    error=result.stderr.strip() if result.stderr.strip() else f"退出码: {result.returncode}",
+                    output=stdout.strip(),
+                    error=stderr.strip() or f"退出码: {result.returncode}",
                     execution_time=elapsed,
                 )
         except subprocess.TimeoutExpired:

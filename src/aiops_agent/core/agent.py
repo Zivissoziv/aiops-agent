@@ -137,6 +137,8 @@ class Agent:
             assistant_msg: dict = {"role": "assistant"}
             if response.content:
                 assistant_msg["content"] = response.content
+            elif response.tool_calls:
+                assistant_msg["content"] = ""  # 某些 LLM（如 DeepSeek）要求 content 不为 null
             if response.tool_calls:
                 assistant_msg["tool_calls"] = [
                     {
@@ -144,7 +146,7 @@ class Agent:
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": tc.arguments,
+                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
                         },
                     }
                     for tc in response.tool_calls
