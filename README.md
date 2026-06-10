@@ -11,12 +11,14 @@
 │   ├── 01_simple_chat.py     # 基础 LLM 对话
 │   ├── 02_tool_calling.py    # 工具调用机制
 │   ├── 03_memory.py          # 三层记忆系统
-│   └── 04_react.py           # ReAct 多步骤规划
+│   ├── 04_react.py           # ReAct 多步骤规划
+│   └── 05_langgraph.py       # LangGraph 状态机
 ├── src/               # 🚀 实战项目 — 可部署的 AIOps Agent
 │   ├── aiops_agent/
 │   │   ├── cli.py            # CLI 交互界面
 │   │   ├── config.py         # 配置管理
-│   │   ├── core/             # Agent 核心引擎
+│   │   ├── core/             # Agent 核心引擎（LangGraph 状态机）
+│   │   ├── core/agent_old.py # 旧版 Agent 实现（参考）
 │   │   ├── llm/              # 多 Provider 适配
 │   │   ├── memory/           # 三层记忆（工作/情景/核心）
 │   │   └── tools/            # 运维工具集
@@ -54,6 +56,9 @@ python examples/03_memory.py
 
 # 示例 04: ReAct 多步骤规划
 python examples/04_react.py
+
+# 示例 05: LangGraph 状态机
+python examples/05_langgraph.py
 ```
 
 ### 3. 运行实战项目
@@ -100,7 +105,8 @@ python -m aiops_agent
 | 02_tool_calling | 工具调用 | Function Calling、JSON Schema、Tool Loop | ✅ |
 | 03_memory | 三层记忆系统 | 工作记忆、情景记忆、核心记忆、压缩机制 | ✅ |
 | 04_react | ReAct 多步骤规划 | Thought、Action、Observation 循环 | ✅ |
-| 05_rag | 知识库问答 | Embedding、向量检索、RAG | 📝 规划中 |
+| 05_langgraph | LangGraph 状态机 | StateGraph、Node、Conditional Edge | ✅ |
+| 06_rag | 知识库问答 | Embedding、向量检索、RAG | 📝 规划中 |
 
 ## 技术栈
 
