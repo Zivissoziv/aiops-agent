@@ -44,6 +44,11 @@ class Agent:
         self.tool_registry = tool_registry
         self.memory = memory
 
+    def _check_compaction(self) -> None:
+        """检查并执行记忆压缩（如果 memory 支持）。"""
+        if self.memory is not None and hasattr(self.memory, 'check_compaction'):
+            self.memory.check_compaction()
+
     def _build_messages(
         self,
         history: list[dict],
@@ -117,12 +122,13 @@ class Agent:
             if self.memory is not None:
                 self.memory.add_message(assistant_msg)
 
-            # 如果有文本回复，输出给用户
+            # LLM 回复循环 → 检查是否需要压缩
             if response.content:
                 yield AgentEvent(
                     type="text",
                     content=response.content,
                 )
+            self._check_compaction()
 
             # 如果没有工具调用，结束本轮
             if not response.tool_calls:
@@ -167,6 +173,9 @@ class Agent:
                         "execution_time": result.execution_time,
                     },
                 )
+
+            # 工具调用循环后 → 检查是否需要压缩
+            self._check_compaction()
         else:
             yield AgentEvent(
                 type="error",
