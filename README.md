@@ -9,13 +9,15 @@
 ```
 ├── examples/          # 📚 教学示例 — 每文件一个概念，可独立运行
 │   ├── 01_simple_chat.py     # 基础 LLM 对话
-│   └── 02_tool_calling.py    # 工具调用机制
+│   ├── 02_tool_calling.py    # 工具调用机制
+│   └── 03_memory.py          # 记忆管理
 ├── src/               # 🚀 实战项目 — 可部署的 AIOps Agent
 │   ├── aiops_agent/
 │   │   ├── cli.py            # CLI 交互界面
 │   │   ├── config.py         # 配置管理
 │   │   ├── core/             # Agent 核心引擎
 │   │   ├── llm/              # 多 Provider 适配
+│   │   ├── memory/           # 记忆管理（滑动窗口 / 摘要策略）
 │   │   └── tools/            # 运维工具集
 │   └── pyproject.toml        # uv 打包配置
 ├── docs/
@@ -45,6 +47,9 @@ python examples/01_simple_chat.py
 
 # 示例 02: 工具调用
 python examples/02_tool_calling.py
+
+# 示例 03: 记忆管理
+python examples/03_memory.py
 ```
 
 ### 3. 运行实战项目
@@ -71,6 +76,7 @@ python -m aiops_agent
 | `/help` | 显示帮助信息 |
 | `/exit` | 退出程序 |
 | `/tools` | 查看可用工具 |
+| `/memory` | 查看记忆状态（消息数、Token 估算） |
 | `/clear` | 清空对话历史 |
 | `/config` | 查看当前配置 |
 
@@ -80,7 +86,7 @@ python -m aiops_agent
 |------|---------|---------|------|
 | 01_simple_chat | 基础 LLM 对话 | System Prompt、消息结构、流式输出 | ✅ |
 | 02_tool_calling | 工具调用 | Function Calling、JSON Schema、Tool Loop | ✅ |
-| 03_memory | 对话记忆管理 | 窗口策略、摘要策略、Token 管理 | 📝 规划中 |
+| 03_memory | 对话记忆管理 | 滑动窗口、摘要策略、Token 管理 | ✅ |
 | 04_planning | 多步骤规划 | ReAct、任务分解 | 📝 规划中 |
 | 05_rag | 知识库问答 | Embedding、向量检索、RAG | 📝 规划中 |
 
