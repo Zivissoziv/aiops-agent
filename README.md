@@ -2,40 +2,94 @@
 
 一个**由浅入深**的 AIOps Agent 学习与实战项目。
 
+从基础 LLM 对话开始，逐步实现工具调用、记忆管理、多步骤规划、RAG 知识库等核心能力，最终构建一个可部署的运维智能助手。
+
 ## 项目结构
 
 ```
-├── examples/    # 📚 教学示例 — 每文件一个概念，可独立运行
-└── src/         # 🚀 实战项目 — 可部署的 AIOps Agent
+├── examples/          # 📚 教学示例 — 每文件一个概念，可独立运行
+│   ├── 01_simple_chat.py     # 基础 LLM 对话
+│   └── 02_tool_calling.py    # 工具调用机制
+├── src/               # 🚀 实战项目 — 可部署的 AIOps Agent
+│   ├── aiops_agent/
+│   │   ├── cli.py            # CLI 交互界面
+│   │   ├── config.py         # 配置管理
+│   │   ├── core/             # Agent 核心引擎
+│   │   ├── llm/              # 多 Provider 适配
+│   │   └── tools/            # 运维工具集
+│   └── pyproject.toml        # uv 打包配置
+├── docs/
+│   └── specs/         # 📋 设计文档
+└── .env.example
 ```
 
 ## 快速开始
 
+### 1. 配置环境变量
+
 ```bash
-# 1. 安装 uv（如果未安装）
-# pip install uv
-
-# 2. 复制并配置环境变量
 cp .env.example .env
-# 编辑 .env 填入你的 API Key
-
-# 3. 运行教学示例
-uv run python examples/01_simple_chat.py
-
-# 4. 安装并运行实战项目
-cd src && uv sync
-uv run aiops-agent
+# 编辑 .env 填入你的 API Key 和模型配置
 ```
+
+支持任何 OpenAI 兼容接口（OpenAI / DeepSeek / 通义千问 / 硅基流动 等）。
+
+### 2. 运行教学示例
+
+```bash
+# 安装依赖
+pip install openai python-dotenv
+
+# 示例 01: 基础 LLM 对话
+python examples/01_simple_chat.py
+
+# 示例 02: 工具调用
+python examples/02_tool_calling.py
+```
+
+### 3. 运行实战项目
+
+```bash
+cd src
+pip install -e .
+aiops-agent
+```
+
+或直接通过 Python 模块运行：
+
+```bash
+cd src
+python -m aiops_agent
+```
+
+### CLI 命令
+
+进入 CLI 后支持以下命令：
+
+| 命令 | 说明 |
+|------|------|
+| `/help` | 显示帮助信息 |
+| `/exit` | 退出程序 |
+| `/tools` | 查看可用工具 |
+| `/clear` | 清空对话历史 |
+| `/config` | 查看当前配置 |
 
 ## 教学路线
 
-| 示例 | 学习内容 | 状态 |
-|------|---------|------|
-| 01_simple_chat | 基础 LLM 对话 | ✅ |
-| 02_tool_calling | 工具调用机制 | ✅ |
-| 03_memory | 对话记忆管理 | 📝 规划中 |
-| 04_planning | 多步骤规划 | 📝 规划中 |
-| 05_rag | 知识库问答 | 📝 规划中 |
+| 示例 | 学习内容 | 核心概念 | 状态 |
+|------|---------|---------|------|
+| 01_simple_chat | 基础 LLM 对话 | System Prompt、消息结构、流式输出 | ✅ |
+| 02_tool_calling | 工具调用 | Function Calling、JSON Schema、Tool Loop | ✅ |
+| 03_memory | 对话记忆管理 | 窗口策略、摘要策略、Token 管理 | 📝 规划中 |
+| 04_planning | 多步骤规划 | ReAct、任务分解 | 📝 规划中 |
+| 05_rag | 知识库问答 | Embedding、向量检索、RAG | 📝 规划中 |
+
+## 技术栈
+
+- **语言:** Python 3.10+
+- **LLM SDK:** OpenAI Python SDK（兼容 DeepSeek 等）
+- **包管理:** uv / pip
+- **打包:** hatchling
 
 ## 许可证
 
