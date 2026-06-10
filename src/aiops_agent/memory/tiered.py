@@ -68,6 +68,10 @@ class TieredMemory(Memory):
 
         self._compacting = False
 
+    def __bool__(self) -> bool:
+        """TieredMemory 实例始终为 True（即使内部为空）。"""
+        return True
+
     # ── Memory 接口 ──────────────────────────────────
 
     def add_message(self, message: dict) -> None:
