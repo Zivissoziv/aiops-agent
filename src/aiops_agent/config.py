@@ -31,6 +31,11 @@ class Config:
     system_prompt: str = "你是一个 AIOps 运维助手，擅长通过工具执行运维任务。"
     max_tool_rounds: int = 10
 
+    # Memory 配置
+    memory_strategy: str = "window"       # "window" | "summarizing" | "none"
+    memory_max_messages: int = 20         # 滑窗策略的最大消息数
+    memory_max_tokens: int = 4000         # 摘要策略的触发阈值
+
     @classmethod
     def from_env(cls, env_path: Path | None = None) -> "Config":
         """从 .env 文件加载配置。"""
@@ -49,6 +54,9 @@ class Config:
                 "你是一个 AIOps 运维助手，擅长通过工具执行运维任务。",
             ),
             max_tool_rounds=int(os.getenv("MAX_TOOL_ROUNDS", "10")),
+            memory_strategy=os.getenv("MEMORY_STRATEGY", "window"),
+            memory_max_messages=int(os.getenv("MEMORY_MAX_MESSAGES", "20")),
+            memory_max_tokens=int(os.getenv("MEMORY_MAX_TOKENS", "4000")),
         )
 
     def validate(self) -> list[str]:
