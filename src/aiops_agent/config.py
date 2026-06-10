@@ -32,9 +32,12 @@ class Config:
     max_tool_rounds: int = 10
 
     # Memory 配置
-    memory_strategy: str = "window"       # "window" | "summarizing" | "none"
-    memory_max_messages: int = 20         # 滑窗策略的最大消息数
-    memory_max_tokens: int = 4000         # 摘要策略的触发阈值
+    memory_strategy: str = "tiered"        # "tiered" | "none"
+    memory_max_messages: int = 30          # 工作记忆最大消息数
+    memory_max_tokens: int = 8000          # 工作记忆 token 阈值
+    memory_max_episodes: int = 50          # 情景记忆最大 episode 数
+    memory_recent_episodes: int = 3        # 上下文中包含的最近 episode 数
+    memory_compaction_enabled: bool = True  # 是否启用自动压缩
 
     @classmethod
     def from_env(cls, env_path: Path | None = None) -> "Config":
@@ -54,9 +57,12 @@ class Config:
                 "你是一个 AIOps 运维助手，擅长通过工具执行运维任务。",
             ),
             max_tool_rounds=int(os.getenv("MAX_TOOL_ROUNDS", "10")),
-            memory_strategy=os.getenv("MEMORY_STRATEGY", "window"),
-            memory_max_messages=int(os.getenv("MEMORY_MAX_MESSAGES", "20")),
-            memory_max_tokens=int(os.getenv("MEMORY_MAX_TOKENS", "4000")),
+            memory_strategy=os.getenv("MEMORY_STRATEGY", "tiered"),
+            memory_max_messages=int(os.getenv("MEMORY_MAX_MESSAGES", "30")),
+            memory_max_tokens=int(os.getenv("MEMORY_MAX_TOKENS", "8000")),
+            memory_max_episodes=int(os.getenv("MEMORY_MAX_EPISODES", "50")),
+            memory_recent_episodes=int(os.getenv("MEMORY_RECENT_EPISODES", "3")),
+            memory_compaction_enabled=os.getenv("MEMORY_COMPACTION_ENABLED", "true").lower() == "true",
         )
 
     def validate(self) -> list[str]:
