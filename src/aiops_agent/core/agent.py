@@ -24,7 +24,7 @@ from ..tools import ToolRegistry
 @dataclass
 class AgentEvent:
     """Agent 执行过程中发出的事件，供 CLI/UI 展示。"""
-    type: str  # "text" | "tool_start" | "tool_result" | "error" | "done"
+    type: str  # "thought" | "text" | "tool_start" | "tool_result" | "error" | "done"
     content: str = ""
     data: dict = field(default_factory=dict)
 
@@ -55,18 +55,51 @@ class Agent:
         user_input: str,
     ) -> list[dict]:
         """构建完整的消息列表（无 memory 的向后兼容路径）。"""
+        prompt = self._get_system_prompt()
         return [
-            {"role": "system", "content": self.config.system_prompt},
+            {"role": "system", "content": prompt},
             *history,
             {"role": "user", "content": user_input},
         ]
 
     def _build_messages_from_memory(self) -> list[dict]:
         """从 memory 构建消息列表。"""
+        prompt = self._get_system_prompt()
         return [
-            {"role": "system", "content": self.config.system_prompt},
+            {"role": "system", "content": prompt},
             *self.memory.get_messages(),
         ]
+
+    def _get_system_prompt(self) -> str:
+        """获取 system prompt，ReAct 模式时追加推理指令。"""
+        prompt = self.config.system_prompt
+        if self.config.react_enabled:
+            prompt += (
+                "\n\n请按 ReAct 模式思考和执行:\n"
+                "1. Thought: 分析当前情况，推理下一步该做什么\n"
+                "2. Action: 调用工具执行操作\n"
+                "3. 观察工具返回结果\n"
+                "4. 重复以上步骤，直到可以给出最终答案\n"
+                "5. Final Answer: 给出最终回答"
+            )
+        return prompt
+
+    def _yield_text_or_thought(self, content: str):
+        """根据 ReAct 模式决定输出 thought 还是 text 事件。"""
+        if self.config.react_enabled and "Thought:" in content:
+            # 尝试提取 Thought 部分单独输出
+            import re
+            parts = re.split(r"(Thought:.*?)(?=Action:|Final Answer:|$)", content, flags=re.DOTALL)
+            for part in parts:
+                part = part.strip()
+                if not part:
+                    continue
+                if part.startswith("Thought:"):
+                    yield AgentEvent(type="thought", content=part)
+                else:
+                    yield AgentEvent(type="text", content=part)
+        else:
+            yield AgentEvent(type="text", content=content)
 
     def run(
         self,
@@ -124,10 +157,8 @@ class Agent:
 
             # LLM 回复循环 → 检查是否需要压缩
             if response.content:
-                yield AgentEvent(
-                    type="text",
-                    content=response.content,
-                )
+                for event in self._yield_text_or_thought(response.content):
+                    yield event
             self._check_compaction()
 
             # 如果没有工具调用，结束本轮

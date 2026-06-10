@@ -30,6 +30,7 @@ class Config:
     # Agent 配置
     system_prompt: str = "你是一个 AIOps 运维助手，擅长通过工具执行运维任务。"
     max_tool_rounds: int = 10
+    react_enabled: bool = False  # 是否启用 ReAct 推理模式
 
     # Memory 配置
     memory_strategy: str = "tiered"        # "tiered" | "none"
@@ -57,6 +58,7 @@ class Config:
                 "你是一个 AIOps 运维助手，擅长通过工具执行运维任务。",
             ),
             max_tool_rounds=int(os.getenv("MAX_TOOL_ROUNDS", "10")),
+            react_enabled=os.getenv("REACT_ENABLED", "false").lower() == "true",
             memory_strategy=os.getenv("MEMORY_STRATEGY", "tiered"),
             memory_max_messages=int(os.getenv("MEMORY_MAX_MESSAGES", "30")),
             memory_max_tokens=int(os.getenv("MEMORY_MAX_TOKENS", "8000")),

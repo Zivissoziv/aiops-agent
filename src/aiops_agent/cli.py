@@ -42,7 +42,9 @@ HELP_TEXT = """
 
 def print_event(event: AgentEvent) -> None:
     """格式化输出 Agent 事件。"""
-    if event.type == "text":
+    if event.type == "thought":
+        print(f"\n💭 {event.content}", flush=True)
+    elif event.type == "text":
         print(f"\n助手: {event.content}", flush=True)
     elif event.type == "tool_start":
         print(f"\n{event.content}", flush=True)
@@ -228,6 +230,7 @@ def main() -> None:
                 print(f"  情景记忆上限: {config.memory_max_episodes}")
                 print(f"  上下文包含情景数: {config.memory_recent_episodes}")
                 print(f"  自动压缩: {'开启' if config.memory_compaction_enabled else '关闭'}")
+                print(f"  ReAct 模式: {'开启' if config.react_enabled else '关闭'}")
                 continue
             else:
                 print(f"未知命令: {user_input}，输入 /help 查看可用命令")
