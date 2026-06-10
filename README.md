@@ -10,7 +10,8 @@
 ├── examples/          # 📚 教学示例 — 每文件一个概念，可独立运行
 │   ├── 01_simple_chat.py     # 基础 LLM 对话
 │   ├── 02_tool_calling.py    # 工具调用机制
-│   └── 03_memory.py          # 记忆管理
+│   ├── 03_memory.py          # 三层记忆系统
+│   └── 04_react.py           # ReAct 多步骤规划
 ├── src/               # 🚀 实战项目 — 可部署的 AIOps Agent
 │   ├── aiops_agent/
 │   │   ├── cli.py            # CLI 交互界面
@@ -48,8 +49,11 @@ python examples/01_simple_chat.py
 # 示例 02: 工具调用
 python examples/02_tool_calling.py
 
-# 示例 03: 记忆管理
+# 示例 03: 三层记忆系统
 python examples/03_memory.py
+
+# 示例 04: ReAct 多步骤规划
+python examples/04_react.py
 ```
 
 ### 3. 运行实战项目
@@ -83,6 +87,11 @@ python -m aiops_agent
 | `/clear` | 清空所有记忆 |
 | `/config` | 查看当前配置 |
 
+### ReAct 模式
+
+在 `.env` 中设置 `REACT_ENABLED=true` 启用 ReAct 推理模式。
+启用后 Agent 会输出显式的 `Thought:` 推理过程，适合需要多步推理的复杂运维任务。
+
 ## 教学路线
 
 | 示例 | 学习内容 | 核心概念 | 状态 |
@@ -90,7 +99,7 @@ python -m aiops_agent
 | 01_simple_chat | 基础 LLM 对话 | System Prompt、消息结构、流式输出 | ✅ |
 | 02_tool_calling | 工具调用 | Function Calling、JSON Schema、Tool Loop | ✅ |
 | 03_memory | 三层记忆系统 | 工作记忆、情景记忆、核心记忆、压缩机制 | ✅ |
-| 04_planning | 多步骤规划 | ReAct、任务分解 | 📝 规划中 |
+| 04_react | ReAct 多步骤规划 | Thought、Action、Observation 循环 | ✅ |
 | 05_rag | 知识库问答 | Embedding、向量检索、RAG | 📝 规划中 |
 
 ## 技术栈
