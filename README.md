@@ -17,7 +17,7 @@
 │   │   ├── config.py         # 配置管理
 │   │   ├── core/             # Agent 核心引擎
 │   │   ├── llm/              # 多 Provider 适配
-│   │   ├── memory/           # 记忆管理（滑动窗口 / 摘要策略）
+│   │   ├── memory/           # 三层记忆（工作/情景/核心）
 │   │   └── tools/            # 运维工具集
 │   └── pyproject.toml        # uv 打包配置
 ├── docs/
@@ -76,8 +76,11 @@ python -m aiops_agent
 | `/help` | 显示帮助信息 |
 | `/exit` | 退出程序 |
 | `/tools` | 查看可用工具 |
-| `/memory` | 查看记忆状态（消息数、Token 估算） |
-| `/clear` | 清空对话历史 |
+| `/memory` | 查看三层记忆状态 |
+| `/remember <事实>` | 添加核心记忆 |
+| `/forget <事实>` | 删除核心记忆 |
+| `/core` | 查看核心记忆列表 |
+| `/clear` | 清空所有记忆 |
 | `/config` | 查看当前配置 |
 
 ## 教学路线
@@ -86,7 +89,7 @@ python -m aiops_agent
 |------|---------|---------|------|
 | 01_simple_chat | 基础 LLM 对话 | System Prompt、消息结构、流式输出 | ✅ |
 | 02_tool_calling | 工具调用 | Function Calling、JSON Schema、Tool Loop | ✅ |
-| 03_memory | 对话记忆管理 | 滑动窗口、摘要策略、Token 管理 | ✅ |
+| 03_memory | 三层记忆系统 | 工作记忆、情景记忆、核心记忆、压缩机制 | ✅ |
 | 04_planning | 多步骤规划 | ReAct、任务分解 | 📝 规划中 |
 | 05_rag | 知识库问答 | Embedding、向量检索、RAG | 📝 规划中 |
 

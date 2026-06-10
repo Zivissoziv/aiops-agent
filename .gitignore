@@ -21,5 +21,8 @@ build/
 # Claude Code
 .claude/
 
+# Data
+.aiops_data/
+
 # uv
 uv.lock
