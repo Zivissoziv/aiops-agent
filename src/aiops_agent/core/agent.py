@@ -1,19 +1,24 @@
 # d:\workspace\aiops-agent\src\aiops_agent\core\agent.py
-"""Agent 核心引擎。
+"""Agent 核心引擎（LangGraph 实现）。
 
-实现"思考-行动-观察"循环:
-1. 接收用户消息
-2. 调用 LLM（带工具定义）
-3. LLM 返回文本 → 输出
-4. LLM 返回工具调用 → 执行工具 → 结果反馈给 LLM → 回到 2
-5. 达到最大轮次或 LLM 返回纯文本 → 结束
+使用 LangGraph 状态机构造"思考-行动-观察"循环:
+  call_model → execute_tools → call_model → ... → END
 
-支持可选的 Memory 模块管理对话历史。
+节点:
+  call_model    : 调用 LLM，追加回复到消息列表
+  execute_tools : 执行所有 tool_calls，追加结果到消息列表
+
+条件边:
+  should_continue : 有 tool_calls 且未超限 → execute_tools
+                    否则 → END
 """
 
 import json
-from dataclasses import dataclass, field
-from typing import Generator
+import operator
+from dataclasses import dataclass, field, asdict
+from typing import Annotated, Generator, TypedDict
+
+from langgraph.graph import END, StateGraph
 
 from ..config import Config
 from ..llm import BaseLLM
@@ -21,16 +26,50 @@ from ..memory import Memory
 from ..tools import ToolRegistry
 
 
+# ── 事件 ──
+
 @dataclass
 class AgentEvent:
     """Agent 执行过程中发出的事件，供 CLI/UI 展示。"""
-    type: str  # "thought" | "text" | "tool_start" | "tool_result" | "error" | "done"
+    type: str  # "text" | "tool_start" | "tool_result" | "error" | "done"
     content: str = ""
     data: dict = field(default_factory=dict)
 
 
+# ── LangGraph State ──
+
+class AgentState(TypedDict):
+    """LangGraph 状态定义。
+
+    messages: OpenAI 格式消息列表（用 operator.add 实现 reducer）
+    tool_round: 当前工具调用轮次
+    max_rounds: 最大轮次限制
+    events: 待输出的事件列表
+    system_prompt: system prompt 文本
+    llm: LLM 实例（序列化用，实际通过闭包访问）
+    tool_registry: 工具注册中心（通过闭包访问）
+    memory: 可选的记忆模块（通过闭包访问）
+    tool_defs: OpenAI 格式工具定义
+    """
+    messages: Annotated[list, operator.add]
+    tool_round: int
+    max_rounds: int
+    events: Annotated[list, operator.add]
+
+
+# ── Agent 类 ──
+
 class Agent:
-    """Agent 核心引擎。"""
+    """Agent 核心引擎（LangGraph 实现）。
+
+    使用 LangGraph 状态机驱动"思考-行动-观察"循环。
+    保持与旧版相同的接口: __init__() + run()。
+
+    用法:
+      agent = Agent(config=config, llm=llm, tool_registry=registry, memory=memory)
+      for event in agent.run("查一下磁盘"):
+          print_event(event)
+    """
 
     def __init__(
         self,
@@ -43,63 +82,152 @@ class Agent:
         self.llm = llm
         self.tool_registry = tool_registry
         self.memory = memory
+        self._graph = self._build_graph()
+
+    def _build_graph(self) -> StateGraph:
+        """构建 LangGraph 状态机图。"""
+        builder = StateGraph(AgentState)
+
+        builder.add_node("call_model", self._call_model)
+        builder.add_node("execute_tools", self._execute_tools)
+
+        builder.set_entry_point("call_model")
+
+        builder.add_conditional_edges(
+            "call_model",
+            self._should_continue,
+            {"continue": "execute_tools", "end": END},
+        )
+        builder.add_edge("execute_tools", "call_model")
+
+        return builder.compile()
+
+    # ── 节点函数 ──
+
+    def _call_model(self, state: AgentState) -> dict:
+        """调用 LLM，将回复追加到消息列表。"""
+        messages = state["messages"]
+        tool_defs = self.tool_registry.get_openai_tool_defs()
+        tool_defs = tool_defs or None
+
+        response = self.llm.invoke(messages, tools=tool_defs)
+
+        # 构建 assistant 消息
+        assistant_msg: dict = {"role": "assistant"}
+        if response.content:
+            assistant_msg["content"] = response.content
+        elif response.tool_calls:
+            assistant_msg["content"] = ""
+        if response.tool_calls:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                    },
+                }
+                for tc in response.tool_calls
+            ]
+
+        events = []
+
+        # 输出文本事件
+        if response.content:
+            events.append({
+                "type": "text",
+                "content": response.content,
+                "data": {},
+            })
+
+        # 同步到 memory
+        if self.memory is not None:
+            self.memory.add_message(assistant_msg)
+
+        return {
+            "messages": [assistant_msg],
+            "events": events,
+        }
+
+    def _execute_tools(self, state: AgentState) -> dict:
+        """执行所有 tool_calls，追加结果到消息列表。"""
+        last_msg = state["messages"][-1]
+        tool_calls = last_msg.get("tool_calls", [])
+        events = []
+        tool_messages = []
+
+        for tc_data in tool_calls:
+            tc_id = tc_data["id"]
+            func_name = tc_data["function"]["name"]
+            arguments = json.loads(tc_data["function"]["arguments"])
+
+            # 输出 tool_start 事件
+            events.append({
+                "type": "tool_start",
+                "content": f"🔧 正在使用工具: {func_name}({json.dumps(arguments, ensure_ascii=False)})",
+                "data": {"tool_name": func_name, "arguments": arguments},
+            })
+
+            # 执行工具
+            result = self.tool_registry.execute_tool(func_name, arguments)
+
+            # 构建 tool 消息
+            tool_msg = {
+                "role": "tool",
+                "tool_call_id": tc_id,
+                "content": json.dumps(
+                    {
+                        "success": result.success,
+                        "output": result.output,
+                        "error": result.error,
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+            tool_messages.append(tool_msg)
+
+            # 输出 tool_result 事件
+            display_output = result.error if not result.success else result.output
+            events.append({
+                "type": "tool_result",
+                "content": display_output,
+                "data": {
+                    "tool_name": func_name,
+                    "success": result.success,
+                    "execution_time": result.execution_time,
+                },
+            })
+
+            # 同步到 memory
+            if self.memory is not None:
+                self.memory.add_message(tool_msg)
+
+        # 压缩检查
+        if self.memory is not None:
+            self._check_compaction()
+
+        return {
+            "messages": tool_messages,
+            "events": events,
+        }
+
+    def _should_continue(self, state: AgentState) -> str:
+        """条件边：决定继续执行工具还是结束。"""
+        last_msg = state["messages"][-1]
+        has_tool_calls = bool(last_msg.get("tool_calls"))
+        under_limit = state["tool_round"] < state["max_rounds"]
+
+        if has_tool_calls and under_limit:
+            return "continue"
+        return "end"
 
     def _check_compaction(self) -> None:
         """检查并执行记忆压缩（如果 memory 支持）。"""
-        if self.memory is not None and hasattr(self.memory, 'check_compaction'):
+        if hasattr(self.memory, 'check_compaction'):
             self.memory.check_compaction()
 
-    def _build_messages(
-        self,
-        history: list[dict],
-        user_input: str,
-    ) -> list[dict]:
-        """构建完整的消息列表（无 memory 的向后兼容路径）。"""
-        prompt = self._get_system_prompt()
-        return [
-            {"role": "system", "content": prompt},
-            *history,
-            {"role": "user", "content": user_input},
-        ]
-
-    def _build_messages_from_memory(self) -> list[dict]:
-        """从 memory 构建消息列表。"""
-        prompt = self._get_system_prompt()
-        return [
-            {"role": "system", "content": prompt},
-            *self.memory.get_messages(),
-        ]
-
-    def _get_system_prompt(self) -> str:
-        """获取 system prompt，ReAct 模式时追加推理指令。"""
-        prompt = self.config.system_prompt
-        if self.config.react_enabled:
-            prompt += (
-                "\n\n请按 ReAct 模式思考和执行:\n"
-                "1. Thought: 分析当前情况，推理下一步该做什么\n"
-                "2. Action: 调用工具执行操作\n"
-                "3. 观察工具返回结果\n"
-                "4. 重复以上步骤，直到可以给出最终答案\n"
-                "5. Final Answer: 给出最终回答"
-            )
-        return prompt
-
-    def _yield_text_or_thought(self, content: str):
-        """根据 ReAct 模式决定输出 thought 还是 text 事件。"""
-        if self.config.react_enabled and "Thought:" in content:
-            # 尝试提取 Thought 部分单独输出
-            import re
-            parts = re.split(r"(Thought:.*?)(?=Action:|Final Answer:|$)", content, flags=re.DOTALL)
-            for part in parts:
-                part = part.strip()
-                if not part:
-                    continue
-                if part.startswith("Thought:"):
-                    yield AgentEvent(type="thought", content=part)
-                else:
-                    yield AgentEvent(type="text", content=part)
-        else:
-            yield AgentEvent(type="text", content=content)
+    # ── 公开接口 ──
 
     def run(
         self,
@@ -113,106 +241,69 @@ class Agent:
             history: 历史消息列表（仅在无 memory 时使用）
 
         Yields:
-            供 UI 展示的事件
+            供 UI 展示的 AgentEvent
 
         Returns:
             更新后的消息历史
         """
-        # 选择消息构建路径
+        # 构建初始消息列表
         if self.memory is not None:
             self.memory.add_message({"role": "user", "content": user_input})
-            messages = self._build_messages_from_memory()
+            base_messages = [
+                {"role": "system", "content": self.config.system_prompt},
+                *self.memory.get_messages(),
+            ]
         else:
             history = list(history) if history else []
-            messages = self._build_messages(history, user_input)
+            base_messages = [
+                {"role": "system", "content": self.config.system_prompt},
+                *history,
+                {"role": "user", "content": user_input},
+            ]
 
-        tool_defs = self.tool_registry.get_openai_tool_defs()
-        tool_defs = tool_defs or None
+        # 初始状态
+        initial_state: AgentState = {
+            "messages": base_messages,
+            "tool_round": 0,
+            "max_rounds": self.config.max_tool_rounds,
+            "events": [],
+        }
 
-        for _round in range(self.config.max_tool_rounds):
-            # 调用 LLM
-            response = self.llm.invoke(messages, tools=tool_defs)
+        # 运行 LangGraph 图
+        current_state = initial_state
+        max_iterations = self.config.max_tool_rounds + 2  # 安全限制
+        for _ in range(max_iterations):
+            next_state = self._graph.invoke(current_state)
+            current_state = next_state
 
-            # 将 LLM 回复追加到消息列表
-            assistant_msg: dict = {"role": "assistant"}
-            if response.content:
-                assistant_msg["content"] = response.content
-            elif response.tool_calls:
-                assistant_msg["content"] = ""  # 某些 LLM（如 DeepSeek）要求 content 不为 null
-            if response.tool_calls:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
-                        },
-                    }
-                    for tc in response.tool_calls
-                ]
-            messages.append(assistant_msg)
+            # 收集并输出事件
+            for evt_data in next_state.get("events", []):
+                yield AgentEvent(
+                    type=evt_data["type"],
+                    content=evt_data["content"],
+                    data=evt_data["data"],
+                )
 
-            # 记忆路径: 同步添加消息到 memory
-            if self.memory is not None:
-                self.memory.add_message(assistant_msg)
-
-            # LLM 回复循环 → 检查是否需要压缩
-            if response.content:
-                for event in self._yield_text_or_thought(response.content):
-                    yield event
-            self._check_compaction()
-
-            # 如果没有工具调用，结束本轮
-            if not response.tool_calls:
+            # 检查是否应该结束
+            last_msg = next_state["messages"][-1]
+            has_tool_calls = bool(last_msg.get("tool_calls"))
+            if not has_tool_calls:
                 break
 
-            # 逐个执行工具调用
-            for tc in response.tool_calls:
+            # 增加 tool_round
+            current_state["tool_round"] = current_state.get("tool_round", 0) + 1
+
+            # 检查是否超限
+            if current_state["tool_round"] >= self.config.max_tool_rounds:
                 yield AgentEvent(
-                    type="tool_start",
-                    content=f"🔧 正在使用工具: {tc.name}({json.dumps(tc.arguments, ensure_ascii=False)})",
-                    data={"tool_name": tc.name, "arguments": tc.arguments},
+                    type="error",
+                    content=f"⚠️ 已达到最大工具调用轮次（{self.config.max_tool_rounds}），请尝试拆分任务。",
                 )
-
-                result = self.tool_registry.execute_tool(tc.name, tc.arguments)
-
-                # 工具结果追加到消息列表
-                tool_result_msg = {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": json.dumps(
-                        {
-                            "success": result.success,
-                            "output": result.output,
-                            "error": result.error,
-                        },
-                        ensure_ascii=False,
-                    ),
-                }
-                messages.append(tool_result_msg)
-
-                # 记忆路径: 同步添加工具结果到 memory
-                if self.memory is not None:
-                    self.memory.add_message(tool_result_msg)
-
-                display_output = result.error if not result.success else result.output
-                yield AgentEvent(
-                    type="tool_result",
-                    content=display_output,
-                    data={
-                        "tool_name": tc.name,
-                        "success": result.success,
-                        "execution_time": result.execution_time,
-                    },
-                )
-
-            # 工具调用循环后 → 检查是否需要压缩
-            self._check_compaction()
+                break
         else:
             yield AgentEvent(
                 type="error",
-                content=f"⚠️ 已达到最大工具调用轮次（{self.config.max_tool_rounds}），请尝试拆分任务。",
+                content=f"⚠️ 已达到最大迭代次数，请尝试拆分任务。",
             )
 
         yield AgentEvent(type="done", content="")
@@ -220,4 +311,4 @@ class Agent:
         # 返回更新后的历史
         if self.memory is not None:
             return self.memory.get_messages()
-        return messages[1:]
+        return current_state["messages"][1:]
