@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
@@ -16,6 +16,7 @@ from . import __version__
 from .agents import ALL_AGENTS
 from .config import Config, _find_project_root
 from .core import Agent
+from .core.intent_router import classify_intent
 from .llm import create_llm
 from .memory.tiered import TieredMemory
 from .tools import get_tools
@@ -371,6 +372,30 @@ def main() -> None:
                         print("⚠️ 未找到")
                     continue
                 print(f"未知命令: {user_input}")
+                continue
+
+        # ── 意图路由 ──
+        # 简单关键词快速跳过路由（包含工具关键词的不用调 LLM 分类）
+        task_keywords = [
+            "查", "看", "读", "写", "创建", "删除", "修改", "编辑", "运行", "执行",
+            "安装", "下载", "搜索", "分析", "检测", "检查", "排查", "修复",
+            "shell", "read", "write", "edit", "ls", "cat", "grep", "ping",
+            "磁盘", "内存", "cpu", "进程", "日志", "配置", "文件", "目录",
+            "docker", "k8s", "pod", "service", "deploy",
+        ]
+        if not any(kw in user_input for kw in task_keywords):
+            intent = classify_intent(llm, user_input)
+
+            if intent["route"] == "chat":
+                chat_system = "你是一个 AIOps 运维助手。直接友好地回复用户的问题。不要提及工具、文件操作或工作区。"
+                response = llm.invoke([
+                    SystemMessage(content=chat_system),
+                    HumanMessage(content=user_input),
+                ])
+                reply_text = (response.content or "").strip()
+                print(f"\n{reply_text}")
+                memory.add_message({"role": "user", "content": user_input})
+                memory.add_message({"role": "assistant", "content": reply_text})
                 continue
 
         # ── 运行图（双模式流）──
