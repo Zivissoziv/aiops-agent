@@ -15,6 +15,27 @@ def configure_write_approval(handler=None):
     _write_approval_handler = handler
 
 
+# 工作区沙箱路径
+_workspace_path: Path | None = None
+
+
+def configure_workspace(workspace_path: str | Path | None) -> None:
+    """设置沙箱路径。路径在 workspace 内的文件操作免审批，越界需审批。"""
+    global _workspace_path
+    _workspace_path = Path(workspace_path).resolve() if workspace_path else None
+
+
+def _is_in_workspace(path: str | Path) -> bool:
+    """检查路径是否在 workspace 沙箱内。"""
+    if _workspace_path is None:
+        return True  # 没有设置沙箱时，不限制
+    try:
+        resolved = Path(path).resolve()
+        return _workspace_path in resolved.parents or resolved == _workspace_path
+    except (OSError, ValueError):
+        return False
+
+
 @tool
 def read_file(path: str, lines: int = 50) -> str:
     """读取文件内容，返回前 N 行。
@@ -25,6 +46,13 @@ def read_file(path: str, lines: int = 50) -> str:
         path: 文件路径
         lines: 读取的行数，默认 50
     """
+    # workspace 边界检查：越界路径需要审批
+    if not _is_in_workspace(path):
+        if _write_approval_handler:
+            if not _write_approval_handler(path, f"读取文件（前 {lines} 行）"):
+                return f"⚠️ 用户拒绝了读取 {path}"
+        else:
+            return f"错误: 路径不在工作区内且未配置审批回调: {path}"
     try:
         p = Path(path)
         if not p.exists():
@@ -50,21 +78,24 @@ def read_file(path: str, lines: int = 50) -> str:
 
 @tool
 def write_file(path: str, content: str, append: bool = False) -> str:
-    """写入内容到文件（需要用户确认）。
+    """写入内容到文件（越界需要用户确认）。
 
     适用于创建文件、追加日志、修改配置等。
-    写操作会提示用户确认。
+    在工作区内的写操作直接执行，越界会提示用户确认。
 
     Args:
         path: 文件路径
         content: 要写入的内容
         append: 是否追加到文件末尾，默认 False（覆盖写入）
     """
-    # 审批
-    if _write_approval_handler:
-        preview = content[:100]
-        if not _write_approval_handler(path, preview):
-            return f"⚠️ 用户拒绝了写入 {path}"
+    # workspace 边界检查：越界路径需要审批
+    if not _is_in_workspace(path):
+        if _write_approval_handler:
+            preview = content[:100]
+            if not _write_approval_handler(path, preview):
+                return f"⚠️ 用户拒绝了写入 {path}"
+        else:
+            return f"错误: 路径不在工作区内且未配置审批回调: {path}"
 
     try:
         p = Path(path)
