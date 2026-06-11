@@ -254,12 +254,35 @@ class _SubmitPlanArgs(BaseModel):
 
 def _build_submit_plan_tool() -> StructuredTool:
     """构建 SubmitPlan 工具，通过 tool calling 强制结构化 JSON 输出。"""
+    def _submit_plan(**kwargs) -> str:
+        """将 SubmitPlan 参数序列化为 JSON。
+
+        kwargs 中的 Pydantic 对象（如 _TodoItem）需要先转为 dict。
+        """
+        serialized = _serialize_kwargs(kwargs)
+        return json.dumps(serialized, ensure_ascii=False)
     return StructuredTool.from_function(
         name="SubmitPlan",
         description="提交任务规划，包含步骤列表和是否需要其他 Agent 执行",
-        func=lambda **kwargs: json.dumps(kwargs, ensure_ascii=False),
+        func=_submit_plan,
         args_schema=_SubmitPlanArgs,
     )
+
+
+def _serialize_kwargs(kwargs: dict) -> dict:
+    """递归将 kwargs 中所有 Pydantic BaseModel 转为 dict。"""
+    result = {}
+    for key, value in kwargs.items():
+        if isinstance(value, list):
+            result[key] = [
+                item.model_dump() if isinstance(item, BaseModel) else item
+                for item in value
+            ]
+        elif isinstance(value, BaseModel):
+            result[key] = value.model_dump()
+        else:
+            result[key] = value
+    return result
 
 
 def _extract_plan_from_tool_calls(produced_msgs: list[BaseMessage]) -> dict | None:
