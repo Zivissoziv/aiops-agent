@@ -38,6 +38,7 @@ class AppState(TypedDict):
     memory_snapshot: dict[str, Any]
     agent_handoffs: list[AgentHandoff]
     reply: str
+    need_worker: bool  # planner 判断：简单对话直接回，复杂任务交给 worker
 
 
 # ── 数据目录 ──
@@ -118,6 +119,7 @@ def make_agent_node(name: str, agent: Agent, memory: TieredMemory):
             "memory_snapshot": memory.get_stats(),
             "agent_handoffs": [AgentHandoff(from_agent=name, to_agent="", instruction=state.get("task", ""), result=reply)],
             "reply": reply,
+            "need_worker": "[NEED_WORKER]" in reply if name == "planner" else state.get("need_worker", True),
         }
     return node_fn
 
@@ -152,9 +154,18 @@ def build_graph(config: Config, llm, memory: TieredMemory) -> StateGraph:
 
     names = [a["name"] for a in ALL_AGENTS]
     builder.set_entry_point(names[0])
-    for i in range(len(names) - 1):
-        builder.add_edge(names[i], names[i + 1])
-    builder.add_edge(names[-1], END)
+
+    # 第一个 Agent（planner）之后是条件边：需要 worker 则继续，否则结束
+    if len(names) >= 2:
+        def route_after_planner(state: AppState) -> str:
+            return names[1] if state.get("need_worker", True) else END
+        builder.add_conditional_edges(names[0], route_after_planner, {
+            names[1]: names[1],
+            END: END,
+        })
+        for i in range(1, len(names) - 1):
+            builder.add_edge(names[i], names[i + 1])
+        builder.add_edge(names[-1], END)
 
     return builder.compile()
 
