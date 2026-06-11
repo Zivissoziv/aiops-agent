@@ -1,7 +1,7 @@
 # d:\workspace\aiops-agent\src\aiops_agent\graph\complex.py
 """Complex Workflow — planner → worker 执行链。"""
 
-import re
+import json
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -31,20 +31,28 @@ def _build_planner_prompt() -> str:
     agent_descs = "\n".join(
         f"  - {a['name']}: {a.get('description', '未描述')}" for a in others
     )
+    agent_names = [a["name"] for a in others]
     return (
         "你是一个 AIOps 运维规划专家。你的职责:\n"
-        "1. 分析用户的任务\n"
-        "2. 将任务拆解为具体的 TODO 步骤，每个 TODO 一步操作\n"
-        "3. 用 [TODO] 标记每个步骤\n"
-        "4. 每行一个 TODO，格式: - [TODO] 具体操作描述\n"
-        "5. 根据任务类型，分配给合适的 Agent 执行\n\n"
+        "1. 分析用户的任务，将任务拆解为具体的步骤\n"
+        "2. 为每个步骤指定合适的执行 Agent\n"
+        "3. 如果任务无法由任何 Agent 完成（没有合适的工具），直接回复原因\n"
+        "4. 不要指定具体的命令或参数，只需描述做什么即可\n\n"
         f"可用 Agent:\n{agent_descs}\n\n"
-        "6. 如果任务无法由任何 Agent 完成（没有合适的工具），"
-        "直接告知用户原因，**不要**输出 [NEED_WORKER]\n"
-        "7. 如果任务可以分配给其他 Agent 执行，在**最后一行**单独输出 [NEED_WORKER]\n"
-        "8. 如果只是打招呼、问简单问题，直接回复即可\n"
-        "注意: [NEED_WORKER] 只能出现在最后一行，不要在前文出现\n\n"
-        "不要执行工具，只需要输出规划。"
+        f"Agent 名称: {agent_names}\n\n"
+        "在回复末尾用 ```json 代码块返回规划，格式:\n"
+        "```json\n"
+        "{\n"
+        '  "plan_summary": "一句话描述整体计划",\n'
+        '  "todos": [\n'
+        '    {"content": "步骤描述（不指定具体命令）", "assignee": "agent名称"},\n'
+        '    ...\n'
+        '  ],\n'
+        '  "need_worker": true\n'
+        "}\n"
+        "```\n\n"
+        "如果不需要其他 Agent 执行（如纯聊天、纯规划），need_worker 设为 false。\n"
+        "不要执行工具，只需要输出规划和 JSON。"
     )
 
 
@@ -69,6 +77,21 @@ def _make_node(name: str, agent: Agent, memory: TieredMemory):
             if session_context:
                 parts.append("Session context for this multi-turn session:\n" + session_context)
             input_msgs = [HumanMessage(content="\n\n".join(parts))]
+
+        # 将结构化 todos 附加到 worker 的上下文
+        if name != "planner":
+            todos = state.get("todos", [])
+            if todos:
+                todo_lines = "\n".join(
+                    f"  [{todo.get('id', '?')}] {todo.get('content', '')} (assignee: {todo.get('assignee', 'worker')})"
+                    for todo in todos
+                )
+                input_msgs.insert(0, HumanMessage(
+                    content=f"下面是规划好的 TODO 列表，请按顺序执行:\n{todo_lines}"
+                ))
+                input_msgs.insert(0, SystemMessage(
+                    content="以下 TODO 列表由 planner 分配給你。请按顺序执行，完成后在对话中报告状态。"
+                ))
 
         # 从三层记忆注入额外上下文（core + episodic）
         mem_context = memory.get_messages()
@@ -109,10 +132,25 @@ def _make_node(name: str, agent: Agent, memory: TieredMemory):
         result: dict[str, Any] = {}
 
         if name == "planner":
-            todos = re.findall(r'- \[TODO\]\s*(.+)', reply)
-            result["todos"] = todos
-            last_lines = reply.strip().split("\n")[-3:]
-            result["need_worker"] = any("[NEED_WORKER]" in line for line in last_lines)
+            parsed = _extract_json(reply)
+            if parsed:
+                raw_todos = parsed.get("todos") or []
+                todos = [
+                    {
+                        "id": f"todo-{i+1}",
+                        "content": str(todo.get("content", "")),
+                        "assignee": str(todo.get("assignee", "worker")),
+                        "status": "pending",
+                    }
+                    for i, todo in enumerate(raw_todos)
+                    if isinstance(todo, dict) and todo.get("content")
+                ]
+                result["todos"] = todos
+                result["need_worker"] = bool(parsed.get("need_worker")) and len(todos) > 0
+            else:
+                # JSON 解析失败，回退：默认有 worker
+                result["todos"] = _fallback_todos(reply)
+                result["need_worker"] = len(result["todos"]) > 0
         else:
             result["need_worker"] = state.get("need_worker", True)
 
@@ -153,3 +191,36 @@ def build_complex_graph(config: Config, llm, memory: TieredMemory) -> StateGraph
         builder.add_edge(names[-1], END)
 
     return builder.compile()
+
+
+# ── JSON 解析 ──
+
+
+def _extract_json(text: str) -> dict[str, Any] | None:
+    """从模型回复中提取 JSON 对象（最外层大括号）。"""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return None
+    try:
+        parsed = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _fallback_todos(reply: str) -> list[dict]:
+    """当 JSON 解析失败时，从旧格式文本中提取 TODO 作为回退。"""
+    import re
+    items = re.findall(r'- \[TODO\]\s*(.+)', reply)
+    if not items:
+        items = re.findall(r'- \*?\*?TODO\*?\*?\s*:?\s*(.+)', reply, re.IGNORECASE)
+    return [
+        {
+            "id": f"todo-{i+1}",
+            "content": item.strip(),
+            "assignee": "worker",
+            "status": "pending",
+        }
+        for i, item in enumerate(items)
+    ]

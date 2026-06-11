@@ -11,10 +11,11 @@
 
 from .complex import TOOL_MAP, build_complex_graph
 from .entry import build_entry_graph
-from .state import AppState
+from .state import AppState, TodoItem
 
 __all__ = [
     "AppState",
+    "TodoItem",
     "TOOL_MAP",
     "build_entry_graph",
     "build_complex_graph",
