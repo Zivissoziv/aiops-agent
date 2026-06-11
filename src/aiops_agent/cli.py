@@ -47,7 +47,8 @@ class AppState(TypedDict):
     memory_snapshot: dict[str, Any]
     agent_handoffs: list[AgentHandoff]
     reply: str
-    need_worker: bool  # planner 判断：简单对话直接回，复杂任务交给 worker
+    need_worker: bool
+    agent_events: list[dict]  # 供 CLI 展示的 AgentEvent 序列化数据
 
 
 # ── 数据目录 ──
@@ -129,6 +130,7 @@ def make_agent_node(name: str, agent: Agent, memory: TieredMemory):
             "agent_handoffs": [AgentHandoff(from_agent=name, to_agent="", instruction=state.get("task", ""), result=reply)],
             "reply": reply,
             "need_worker": "[NEED_WORKER]" in reply if name == "planner" else state.get("need_worker", True),
+            "agent_events": [{"type": e.type, "content": e.content, "data": e.data} for e in events],
         }
     return node_fn
 
@@ -296,10 +298,19 @@ def main() -> None:
                         print(f"  🤖 [{node_name}]", flush=True)
                         print(f"{'='*50}", flush=True)
 
-                    msgs = updates.get("messages", [])
-                    for msg in msgs:
-                        if hasattr(msg, "content") and msg.content:
-                            print(f"\n{msg.content}", flush=True)
+                    # 打印 Agent 事件（工具调用等）
+                    for evt in updates.get("agent_events", []):
+                        if evt["type"] == "tool_start":
+                            print(f"\n{evt['content']}", flush=True)
+                            print("─── 输出 ──────────────────────────", flush=True)
+                        elif evt["type"] == "tool_result":
+                            content = evt["content"][:2000]
+                            print(content, flush=True)
+                            if len(evt["content"]) > 2000:
+                                print("...(输出过长已截断)")
+                            print("─── 结束 ──────────────────────────", flush=True)
+                        elif evt["type"] == "text":
+                            print(f"\n{evt['content']}", flush=True)
 
         except Exception as e:
             import traceback

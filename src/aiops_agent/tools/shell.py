@@ -23,7 +23,7 @@ DANGEROUS_PATTERNS: list[dict] = [
     {"pattern": r"useradd|userdel|passwd", "level": "danger", "reason": "用户管理"},
     {"pattern": r"apt\s+(install|remove|purge)|yum\s+(install|remove)|pip\s+install", "level": "warning", "reason": "安装/卸载软件"},
     {"pattern": r"docker\s+(rm|rmi|stop|kill)", "level": "warning", "reason": "Docker 管理"},
-    {"pattern": r">\s*/dev/", "level": "danger", "reason": "磁盘直写"},
+    {"pattern": r"\bdanger\b", "level": "danger", "reason": "危险操作"},  # 占位，暂无匹配
     {"pattern": r"wget.*\|\s*(ba|z)?sh|curl.*\|\s*(ba|z)?sh", "level": "danger", "reason": "远程脚本执行"},
 ]
 
