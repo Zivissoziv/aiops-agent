@@ -27,31 +27,7 @@ TOOL_MAP: dict[str, StructuredTool] = {
     ),
 }
 
-
-# ── Agent 配置 ──
-
-AGENT_DEFS: dict[str, dict] = {
-    "planner": {
-        "system_prompt": (
-            "你是一个 AIOps 运维规划专家。你的职责:\n"
-            "1. 分析用户的任务\n"
-            "2. 制定清晰的执行计划\n"
-            "3. 交给运维执行专家去执行\n\n"
-            "不要执行工具，只需要输出规划。"
-        ),
-        "tools": [],
-    },
-    "worker": {
-        "system_prompt": (
-            "你是一个 AIOps 运维执行专家。你的职责:\n"
-            "1. 按计划执行运维操作\n"
-            "2. 使用 shell 工具查看系统状态\n"
-            "3. 给出最终报告\n\n"
-            "执行完成后输出最终结果。"
-        ),
-        "tools": ["shell"],
-    },
-}
+from .agents import ALL_AGENTS
 
 
 # ── 全局状态 ──
@@ -168,12 +144,13 @@ def print_event(event: AgentEvent) -> None:
 def build_graph(config: Config, llm, memory: TieredMemory) -> StateGraph:
     builder = StateGraph(AppState)
 
-    for name, adef in AGENT_DEFS.items():
+    for adef in ALL_AGENTS:
+        name = adef["name"]
         tools = [TOOL_MAP[t] for t in adef["tools"]]
         agent = Agent(name=name, system_prompt=adef["system_prompt"], llm=llm, tools=tools, config=config)
         builder.add_node(name, make_agent_node(name, agent, memory))
 
-    names = list(AGENT_DEFS.keys())
+    names = [a["name"] for a in ALL_AGENTS]
     builder.set_entry_point(names[0])
     for i in range(len(names) - 1):
         builder.add_edge(names[i], names[i + 1])
@@ -203,7 +180,7 @@ def main() -> None:
     )
 
     graph = build_graph(config, llm, memory)
-    mode_label = " → ".join(AGENT_DEFS.keys())
+    mode_label = " → ".join(a["name"] for a in ALL_AGENTS)
 
     print(BANNER.format(version=__version__, model=config.model, mode=mode_label))
 
