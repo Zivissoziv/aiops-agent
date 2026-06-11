@@ -5,11 +5,11 @@ import inspect
 
 from langchain_core.tools import StructuredTool
 
-from . import file_tools, shell
+from . import file_tools, notepad_tool, shell
 
 
 def _iter_tools():
-    for mod_name in ["file_tools", "shell"]:
+    for mod_name in ["file_tools", "notepad_tool", "shell"]:
         mod = globals().get(mod_name)
         if mod is None:
             continue
