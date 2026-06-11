@@ -2,10 +2,11 @@
 """CLI — LangGraph 流式事件消费 + 审批回调。"""
 
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
@@ -40,18 +41,21 @@ class AppState(TypedDict):
 # ── 数据目录 ──
 
 DATA_DIR = _find_project_root() / ".aiops_data"
+WORKSPACE_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+WORKSPACE_DIR = DATA_DIR / "workspaces" / WORKSPACE_ID
 
 
 # ── Banner / Help ──
 
 BANNER = """
-╔══════════════════════════════════════════╗
+╔══════════════════════════════════════════════╗
 ║           AIOps Agent v{version:<13}║
 ║   模型: {model:<29}║
 ║   模式: {mode:<29}║
+║   Workspace: {workspace:<24}║
 ║                                          ║
 ║   输入 /help 查看命令, /exit 退出         ║
-╚══════════════════════════════════════════╝
+╚══════════════════════════════════════════════╝
 """
 
 HELP_TEXT = """
@@ -60,6 +64,7 @@ HELP_TEXT = """
   /exit              退出程序
   /tools             查看可用工具
   /memory            查看三层记忆状态
+  /workspace         查看当前 Workspace
   /remember <事实>   添加核心记忆
   /forget <事实>     删除核心记忆
   /core              查看核心记忆列表
@@ -121,7 +126,28 @@ def build_graph(config: Config, llm, memory: TieredMemory) -> StateGraph:
         def make_node(n: str, a: Agent, mem: TieredMemory):
             def node_fn(state: AppState, writer: StreamWriter) -> dict:
                 writer({"type": "agent_start", "agent": n})
-                input_msgs = [HumanMessage(content=state.get("task", ""))]
+                # 从 state 获取本轮对话历史
+                input_msgs: list[BaseMessage] = list(state.get("messages", []))
+                if not input_msgs:
+                    input_msgs = [HumanMessage(content=state.get("task", ""))]
+
+                # 从三层记忆注入额外上下文（core + episodic）
+                # 这些不是 LangGraph BaseMessage 类型，不放在 state["messages"] 里，
+                # 而是以 system/assistant dict 格式注入到 Agent.run() 的输入中
+                mem_context = mem.get_messages()
+                # 过滤出 system（core）和 assistant（episodic）角色的消息
+                extra_context = [m for m in mem_context if m.get("role") in ("system", "assistant")]
+                if extra_context:
+                    # 转为 BaseMessage 注入
+                    ctx_msgs: list[BaseMessage] = []
+                    for ctx in extra_context:
+                        if ctx["role"] == "system":
+                            from langchain_core.messages import SystemMessage
+                            ctx_msgs.append(SystemMessage(content=ctx["content"]))
+                        elif ctx["role"] == "assistant":
+                            ctx_msgs.append(AIMessage(content=ctx["content"]))
+                    input_msgs = [*ctx_msgs, *input_msgs]
+
                 produced_msgs, events = a.run(input_msgs)
                 reply = ""
                 for m in reversed(produced_msgs):
@@ -224,13 +250,16 @@ def main() -> None:
 
     llm = create_llm(config)
 
+    # 确保 workspace 目录存在
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+
     memory = TieredMemory(
         llm=llm,
         compaction_enabled=True,
         working_max_messages=2,
         working_max_tokens=500,
         core_persist_path=DATA_DIR / "core_memory.json",
-        episodic_persist_path=DATA_DIR / "episodic_memory.json",
+        episodic_persist_path=WORKSPACE_DIR / "episodic_memory.json",
     )
 
     # 注册 Shell 审批回调
@@ -244,9 +273,30 @@ def main() -> None:
     graph = build_graph(config, llm, memory)
     mode_label = " → ".join(a["name"] for a in ALL_AGENTS)
 
-    print(BANNER.format(version=__version__, model=config.model, mode=mode_label))
+    print(BANNER.format(version=__version__, model=config.model, mode=mode_label, workspace=WORKSPACE_ID))
 
     # ── 主循环 ──
+
+    # state 全程持续存在，每轮只追加当前输入
+    # 启动时从 TieredMemory 恢复历史对话（只恢复 user/assistant/tool，不恢复 core/episodic）
+    # core 和 episodic 会在 make_node 中通过 mem.get_messages() 注入
+    working_history = memory.working.get_messages()
+    restored_messages: list[BaseMessage] = []
+    for m in working_history:
+        if m.get("role") == "user":
+            restored_messages.append(HumanMessage(content=m.get("content", "")))
+        elif m.get("role") == "assistant":
+            restored_messages.append(AIMessage(content=m.get("content", "")))
+        elif m.get("role") == "tool":
+            tid = m.get("tool_call_id", "")
+            restored_messages.append(ToolMessage(content=m.get("content", ""), tool_call_id=tid))
+
+    state: AppState = {
+        "messages": restored_messages,
+        "task": "",
+        "need_worker": False,
+    }
+
     while True:
         try:
             user_input = input("\n你: ").strip()
@@ -279,6 +329,7 @@ def main() -> None:
                 continue
             elif cmd == "/clear":
                 memory.reset()
+                state["messages"] = []
                 print("✅ 对话已清空")
                 continue
             elif cmd == "/core":
@@ -294,6 +345,10 @@ def main() -> None:
                 print(f"\n  Provider: {config.llm_provider}")
                 print(f"  Model: {config.model}")
                 print(f"  Agent 模式: {mode_label}")
+                continue
+            elif cmd == "/workspace":
+                print(f"\n  当前 Workspace: {WORKSPACE_ID}")
+                print(f"  路径: {WORKSPACE_DIR}")
                 continue
             else:
                 if cmd_parts[0] == "/remember" and len(cmd_parts) >= 2:
@@ -311,17 +366,24 @@ def main() -> None:
 
         # ── 运行图（双模式流）──
         try:
-            state: AppState = {
-                "messages": [HumanMessage(content=user_input)],
-                "task": user_input,
-                "need_worker": False,
-            }
+            # 每轮重置 seen_agents，让 agent_start banner 重新显示
+            _seen_agents_in_session.clear()
+
+            # 将当前用户输入追加到持续存在的 state 中
+            new_msg = HumanMessage(content=user_input)
+            state["messages"].append(new_msg)
+            state["task"] = user_input
+            state["need_worker"] = False
 
             for mode, event in graph.stream(state, stream_mode=["updates", "custom"]):
                 if mode == "custom":
                     print_custom_event(event)
                 elif mode == "updates":
                     print_graph_update(event)
+
+            # graph.stream 结束后，将本轮用户输入同步到 TieredMemory
+            # （AI 回复已在 make_node 中同步）
+            memory.add_message({"role": "user", "content": user_input})
 
         except Exception as e:
             import traceback
