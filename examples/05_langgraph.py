@@ -1,11 +1,11 @@
 """
-examples/05_langgraph.py — LangGraph Agent 状态机
+examples/05_langgraph.py — LangGraph Agent 状态机（ToolNode 版）
 
 学习目标:
   1. 理解状态机（StateGraph）的概念
   2. 理解 Node（节点）、Edge（边）、Conditional Edge（条件边）
-  3. 学会用 LangGraph 构建 Agent 工具调用循环
-  4. 观察状态如何在不同节点间流转
+  3. 学会用 ToolNode 自动执行工具调用
+  4. 理解 AIMessage / ToolMessage 的消息流转
 
 运行方式:
   python examples/05_langgraph.py
@@ -16,9 +16,9 @@ examples/05_langgraph.py — LangGraph Agent 状态机
 核心概念:
   - State: 状态（消息列表、轮次等）
   - Node: 节点（处理函数，读写 State）
-  - Edge: 边（节点间的连接）
-  - Conditional Edge: 条件边（根据 State 决定下一步去向）
-  - LangGraph 让 Agent 的控制流变得清晰可见
+  - ToolNode: LangGraph 内置的工具执行节点
+  - AIMessage: 带 tool_calls 的消息 → ToolNode 自动识别
+  - ToolMessage: 工具执行结果
 """
 
 import json
@@ -37,6 +37,8 @@ from _common import load_config
 
 try:
     from langgraph.graph import END, StateGraph
+    from langgraph.prebuilt import ToolNode
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
     LANGGRAPH_AVAILABLE = True
 except ImportError:
     LANGGRAPH_AVAILABLE = False
@@ -50,26 +52,6 @@ model = config["model"]
 client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
 
 SYSTEM_PROMPT = "你是一个 AIOps 运维助手，可以通过工具执行运维任务。"
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "shell",
-            "description": "执行 Shell 命令，返回命令输出",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "要执行的 Shell 命令",
-                    },
-                },
-                "required": ["command"],
-            },
-        },
-    },
-]
 
 
 def execute_shell(command: str) -> str:
@@ -97,105 +79,112 @@ def run_part1():
   手动 Tool Calling 循环（如 04_react.py）的问题:
 
   1. 控制流分散在 for 循环 + if break 中
-  2. 状态管理隐式（messages 列表全靠手动 append）
-  3. 要增加新功能（如重试、记忆、分支）需要改循环逻辑
-  4. 代码量和复杂度随功能线性增长
+  2. 消息管理全靠手动 append
+  3. 增加新功能（重试、记忆、分支）需要改循环逻辑
 
   状态机（StateGraph）的解法:
 
-  ┌──────────────────────────────────────────┐
-  │                                          │
-  │   ┌───────────┐                          │
-  │   │ call_model │ (节点: 调 LLM)           │
-  │   └─────┬─────┘                          │
-  │         │                                │
-  │   ┌─────▼──────┐                         │
-  │   │ 有条件吗？   │ (条件边)                │
-  │   │ 有 tool?   │                         │
-  │   └──┬──────┬──┘                         │
-  │      │ 有   │ 无                          │
-  │   ┌──▼────┐  │                           │
-  │   │exec   │  │                           │
-  │   │tools  │  │  (节点: 执行工具)          │
-  │   └──┬────┘  │                           │
-  │      │       │                            │
-  │      └───┬───┘                            │
-  │          ▼                                │
-  │       ┌─────┐                             │
-  │       │ END  │                            │
-  │       └─────┘                             │
-  │                                          │
-  └──────────────────────────────────────────┘
+  ┌──────────────────────────────────┐
+  │                                  │
+  │   ┌───────────┐                  │
+  │   │ call_model │ (LLM 推理)       │
+  │   └─────┬─────┘                  │
+  │         │                        │
+  │   ┌─────▼──────┐                 │
+  │   │  有 tool?   │ (条件边)        │
+  │   └──┬──────┬──┘                 │
+  │      │ 有   │ 无                  │
+  │   ┌──▼────┐  │                   │
+  │   │ ToolNode│ │ (自动执行工具)     │
+  │   └──┬────┘  │                   │
+  │      │       │                    │
+  │      └───┬───┘                    │
+  │          ▼                        │
+  │       ┌─────┐                     │
+  │       │ END  │                    │
+  │       └─────┘                     │
+  │                                  │
+  └──────────────────────────────────┘
 
-  每次状态更新都通过 State（一个 TypedDict）显式传递，
-  每个节点只读/写自己关心的 State 字段。
+  ToolNode 自动从 AIMessage.tool_calls 中提取工具调用，
+  执行后自动追加 ToolMessage 到消息列表。
 """)
     input("\n  按 Enter 进入 Part 2...")
 
 
 # ============================================================
-# Part 2: LangGraph 核心概念
+# Part 2: LangGraph + ToolNode 核心概念
 # ============================================================
 
 def run_part2():
     print("\n" + "=" * 60)
-    print("  Part 2: LangGraph 核心概念")
+    print("  Part 2: LangGraph + ToolNode 核心概念")
     print("=" * 60)
     print("""
   LangGraph 的三个核心概念:
 
   1. State（状态）
-     - 一个 TypedDict，描述"整个系统的状态"
-     - 字段可以定义 reducer（如 operator.add 实现列表追加）
-     - 每个节点都可以读/写 State
+     - TypedDict，描述系统状态
+     - 字段可定义 reducer（如 operator.add 实现追加）
 
   2. Node（节点）
-     - 一个函数，接收 State，返回 State 的更新
-     - 每个节点只做一件事
+     - 函数，接收 State，返回 State 更新
+     - ToolNode 是内置节点，自动执行工具
 
-  3. Edge（边）/ Conditional Edge（条件边）
-     - Edge: 从一个节点到另一个节点的固定连接
-     - Conditional Edge: 根据 State 中的值决定去向
+  3. Conditional Edge（条件边）
+     - 根据 State 决定下一步去向
 
-  类比:
-  ┌──────────┬──────────────┬────────────────────┐
-  │ 概念      │ 传统代码      │ LangGraph          │
-  ├──────────┼──────────────┼────────────────────┤
-  │ 状态      │ messages 列表 │ AgentState         │
-  │ 循环      │ for _ in ... │ call → exec → call │
-  │ 分支      │ if/else      │ conditional edge   │
-  │ 控制流    │ 函数内部逻辑   │ 图结构（声明式）    │
-  └──────────┴──────────────┴────────────────────┘
-
-  LangGraph 的优势:
-  - 控制流声明式声明（add_node, add_edge），不是写在代码里
-  - 状态管理自动（reducer 处理追加/合并）
-  - 每个节点可独立测试
-  - 可视化（可以打印图结构）
+  消息流转:
+  ┌────────────────────────────────────────────┐
+  │                                            │
+  │   call_model 节点                           │
+  │     ↓ 返回 AIMessage(tool_calls=[...])      │
+  │                                            │
+  │   ToolNode 节点                             │
+  │     ↓ 自动执行工具，返回 ToolMessage          │
+  │                                            │
+  │   call_model 节点（循环）                    │
+  │     ↓ 返回 AIMessage(content="最终答案")     │
+  │                                            │
+  │   END                                       │
+  │                                            │
+  └────────────────────────────────────────────┘
 """)
     input("\n  按 Enter 进入 Part 3...")
 
 
 # ============================================================
-# Part 3: 用 LangGraph 构建 Agent
+# Part 3: 用 LangGraph + ToolNode 构建 Agent
 # ============================================================
 
 def run_part3():
     print("\n" + "=" * 60)
-    print("  Part 3: 用 LangGraph 构建 Agent")
+    print("  Part 3: 用 LangGraph + ToolNode 构建 Agent")
     print("=" * 60)
 
     if not LANGGRAPH_AVAILABLE:
-        print("\n  ❌ 未安装 langgraph，请运行: pip install langgraph")
+        print("\n  ❌ 请安装依赖: pip install langgraph langchain-core")
         return
 
-    # ── Step 1: 定义 State ──
-    print("\n  步骤 1: 定义 State")
+    # ── Step 1: 定义工具函数（供 ToolNode 使用）──
+    print("\n  步骤 1: 定义工具函数")
+
+    def shell_tool(command: str, timeout: int = 30) -> str:
+        """执行 Shell 命令，返回命令输出。"""
+        result = execute_shell(command)
+        return json.dumps({"output": result}, ensure_ascii=False)
+
+    # ToolNode 通过 __name__ 识别工具名
+    shell_tool.__name__ = "shell"
+    shell_tool.__doc__ = "执行 Shell 命令，查看系统状态"
+
+    print("    ✅ def shell_tool(command, timeout) -> str")
+    print("    ✅   __name__ = 'shell'  ← ToolNode 用这个识别工具")
+
+    # ── Step 2: 定义 State ──
+    print("\n  步骤 2: 定义 State")
 
     class AgentState(TypedDict):
-        """Agent 的状态。"""
-        # messages 使用 operator.add 作为 reducer
-        # 这样每次 return {"messages": [new_msg]} 时会自动追加到列表中
         messages: Annotated[list, operator.add]
         tool_round: int
         max_rounds: int
@@ -203,111 +192,118 @@ def run_part3():
     print("    ✅ class AgentState(TypedDict):")
     print("    ✅   messages: Annotated[list, operator.add]")
     print("    ✅   tool_round: int")
-    print("    ✅   max_rounds: int")
 
-    # ── Step 2: 定义节点函数 ──
-    print("\n  步骤 2: 定义节点")
+    # ── Step 3: 定义节点 ──
+    print("\n  步骤 3: 定义节点")
 
     def call_model(state: AgentState) -> dict:
-        """节点: 调用 LLM。"""
+        """节点: 调用 LLM，返回 AIMessage。"""
+        # 将 state 中的消息转为 OpenAI API 格式
+        dict_messages = []
+        for m in state["messages"]:
+            if isinstance(m, AIMessage):
+                d = {"role": "assistant", "content": m.content or ""}
+                if m.tool_calls:
+                    d["tool_calls"] = [
+                        {"id": tc["id"], "type": "function",
+                         "function": {"name": tc["name"],
+                                      "arguments": json.dumps(tc["args"], ensure_ascii=False)}}
+                        for tc in m.tool_calls
+                    ]
+                dict_messages.append(d)
+            elif isinstance(m, ToolMessage):
+                dict_messages.append({"role": "tool", "tool_call_id": m.tool_call_id, "content": m.content})
+            elif isinstance(m, SystemMessage):
+                dict_messages.append({"role": "system", "content": m.content})
+            else:
+                dict_messages.append({"role": "user", "content": m.content})
+
+        # OpenAI 工具定义
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "shell",
+                "description": "执行 Shell 命令，返回命令输出",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "要执行的命令"},
+                        "timeout": {"type": "integer", "description": "超时秒数", "default": 30},
+                    },
+                    "required": ["command"],
+                },
+            },
+        }]
+
         response = client.chat.completions.create(
             model=model,
-            messages=state["messages"],
-            tools=TOOLS,
+            messages=dict_messages,
+            tools=tools,
         )
         choice = response.choices[0]
         msg = choice.message
 
-        assistant_msg = {"role": "assistant"}
-        if msg.content:
-            assistant_msg["content"] = msg.content
+        # 返回 AIMessage（含 tool_calls 时 ToolNode 会自动识别）
         if msg.tool_calls:
-            assistant_msg["content"] = ""
-            assistant_msg["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in msg.tool_calls
-            ]
+            ai_msg = AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": tc.function.name,
+                     "args": json.loads(tc.function.arguments),
+                     "id": tc.id}
+                    for tc in msg.tool_calls
+                ],
+            )
+            print(f"    🤖 工具调用: {msg.tool_calls[0].function.name}")
+        else:
+            ai_msg = AIMessage(content=msg.content or "")
+            print(f"    🤖 回复: {msg.content[:40]}...")
 
-        print(f"    🤖 LLM 回复: {msg.content[:60] if msg.content else '(工具调用)'}...")
+        return {"messages": [ai_msg]}
 
-        return {"messages": [assistant_msg]}
+    print("    ✅ def call_model(state)  → 返回 AIMessage")
+    print("    ✅   AIMessage(tool_calls=[...]) → ToolNode 自动识别")
 
-    print("    ✅ def call_model(state) -> dict:")
-    print("    ✅   调用 LLM，返回 assistant 消息")
+    # ── Step 4: 用 ToolNode ──
+    print("\n  步骤 4: 使用 ToolNode")
 
-    def execute_tools(state: AgentState) -> dict:
-        """节点: 执行所有工具调用。"""
-        last_msg = state["messages"][-1]
-        tool_calls = last_msg.get("tool_calls", [])
-        tool_msgs = []
-
-        for tc in tool_calls:
-            func_name = tc["function"]["name"]
-            args = json.loads(tc["function"]["arguments"])
-            print(f"    🔧 执行: {func_name}({json.dumps(args)})")
-
-            result = execute_shell(args.get("command", ""))
-
-            tool_msgs.append({
-                "role": "tool",
-                "tool_call_id": tc["id"],
-                "content": result,
-            })
-            print(f"    👁 结果: {result[:60]}...")
-
-        return {"messages": tool_msgs}
-
-    print("    ✅ def execute_tools(state) -> dict:")
-    print("    ✅   执行所有 tool_calls，返回 tool 消息")
+    tool_node = ToolNode([shell_tool])
+    print("    ✅ tool_node = ToolNode([shell_tool])")
 
     def should_continue(state: AgentState) -> str:
-        """条件边: 决定继续还是结束。"""
-        last_msg = state["messages"][-1]
-        has_tools = bool(last_msg.get("tool_calls"))
-        under_limit = state["tool_round"] < state["max_rounds"]
-
-        if has_tools and under_limit:
-            print(f"    🔄 有工具调用(轮次 {state['tool_round']+1}/{state['max_rounds']})，继续")
+        last = state["messages"][-1]
+        has_tc = isinstance(last, AIMessage) and bool(last.tool_calls)
+        if has_tc and state["tool_round"] < state["max_rounds"]:
+            print(f"    🔄 有工具调用(轮次 {state['tool_round']+1})，继续")
             return "continue"
-        elif has_tools:
-            print(f"    ⛔ 达到最大轮次 {state['max_rounds']}，结束")
-        else:
-            print("    ✅ 无工具调用，结束")
+        print("    ✅ 无工具调用，结束")
         return "end"
 
-    # ── Step 3: 构建图 ──
-    print("\n  步骤 3: 构建图")
+    # ── Step 5: 构建图 ──
+    print("\n  步骤 5: 构建图")
 
     builder = StateGraph(AgentState)
     builder.add_node("call_model", call_model)
-    builder.add_node("execute_tools", execute_tools)
+    builder.add_node("tools", tool_node)
     builder.set_entry_point("call_model")
 
     builder.add_conditional_edges(
-        "call_model",
-        should_continue,
-        {"continue": "execute_tools", "end": END},
+        "call_model", should_continue,
+        {"continue": "tools", "end": END},
     )
-    builder.add_edge("execute_tools", "call_model")
+    builder.add_edge("tools", "call_model")
 
     graph = builder.compile()
-    print("    ✅ StateGraph 构建完成")
+    print("    ✅ StateGraph + ToolNode 构建完成")
 
-    # ── Step 4: 运行图 ──
-    print("\n  步骤 4: 运行图\n")
+    # ── Step 6: 运行图 ──
+    print("\n  步骤 6: 运行图\n")
 
     task = "查下当前磁盘使用情况"
     initial_state: AgentState = {
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": task},
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=task),
         ],
         "tool_round": 0,
         "max_rounds": 5,
@@ -322,27 +318,25 @@ def run_part3():
         current = next_state
         current["tool_round"] = current.get("tool_round", 0) + 1
 
-        last_msg = current["messages"][-1]
-        has_tools = bool(last_msg.get("tool_calls"))
-        if not has_tools:
+        last = current["messages"][-1]
+        if isinstance(last, AIMessage) and not last.tool_calls:
             break
 
     # 展示最终结果
     print(f"\n  {'─' * 50}")
     print(f"  最终状态: {len(current['messages'])} 条消息")
     for msg in current["messages"]:
-        role = msg["role"]
-        if role == "user":
-            print(f"    👤 {msg['content'][:40]}...")
-        elif role == "assistant":
-            content = msg.get("content", "")
-            tc = msg.get("tool_calls")
-            if tc:
-                print(f"    🤖 工具调用: {tc[0]['function']['name']}")
-            elif content:
-                print(f"    🤖 {content[:60]}...")
-        elif role == "tool":
-            print(f"    🔧 工具结果: {msg['content'][:40]}...")
+        if isinstance(msg, SystemMessage):
+            print(f"    📋 System: {msg.content[:30]}...")
+        elif isinstance(msg, HumanMessage):
+            print(f"    👤 {msg.content[:40]}...")
+        elif isinstance(msg, AIMessage):
+            if msg.tool_calls:
+                print(f"    🤖 工具调用: {msg.tool_calls[0]['name']}")
+            elif msg.content:
+                print(f"    🤖 {msg.content[:60]}...")
+        elif isinstance(msg, ToolMessage):
+            print(f"    🔧 工具结果: {msg.content[:40]}...")
 
     input("\n  按 Enter 进入 Part 4...")
 
@@ -356,26 +350,28 @@ def run_part4():
     print("  Part 4: 对比与讨论")
     print("=" * 60)
     print("""
-  手动循环 vs LangGraph 状态机:
+  手动执行 vs ToolNode:
 
-  ┌─────────────┬────────────────────┬──────────────────────┐
-  │              │ 手动循环 (04_react) │ LangGraph (05)       │
-  ├─────────────┼────────────────────┼──────────────────────┤
-  │ 控制流       │ for + if break     │ 声明式的图结构        │
-  │ 状态管理     │ 手动 list.append   │ reducer 自动追加      │
-  │ 增加功能     │ 改循环逻辑          │ 加节点/改边           │
-  │ 可测试性     │ 需要 mock 整个循环  │ 每个节点单独测        │
-  │ 可视化       │ 无                 │ 可以打印图结构        │
-  │ 学习曲线     │ 低                 │ 中等                 │
-  └─────────────┴────────────────────┴──────────────────────┘
+  ┌──────────────┬────────────────────┬──────────────────────┐
+  │               │ 手写 execute_tools │ ToolNode              │
+  ├──────────────┼────────────────────┼──────────────────────┤
+  │ 工具识别      │ 手动解析 tool_calls │ 自动从 AIMessage 读取 │
+  │ 消息追加      │ 手动 append        │ 自动追加 ToolMessage  │
+  │ 错误处理      │ 自己写 try/except   │ 内置错误处理          │
+  │ 并发执行      │ 需要手动实现        │ 可配置并行            │
+  │ 代码量        │ ~40 行             │ 1 行                  │
+  └──────────────┴────────────────────┴──────────────────────┘
 
-  实战项目中的 LangGraph Agent:
-    src/aiops_agent/core/agent.py 已用 LangGraph 重写，
-    保留相同的 Agent/AgentEvent 接口，
-    但内部使用 StateGraph 驱动。
+  AIMessage ↔ ToolMessage 消息流转:
+    call_model 返回 AIMessage(tool_calls=[...])
+      → ToolNode 自动执行
+      → 追加 ToolMessage 到 state.messages
+      → call_model 看到工具结果继续推理
+      → 直到返回无 tool_calls 的 AIMessage → END
 
-  下一阶段:
-    RAG 知识库 — 让 Agent 能检索运维文档和 Runbook 来回答问题
+  实战项目中的 ToolNode:
+    src/aiops_agent/core/agent.py 同样使用 ToolNode,
+    加上 plan 节点实现 Plan-and-Execute 模式。
 """)
     print("再见！\n")
 
@@ -386,7 +382,7 @@ def run_part4():
 
 if __name__ == "__main__":
     print(f"\n{'='*60}")
-    print(f"  LangGraph Agent 状态机示例 (Model: {model})")
+    print(f"  LangGraph + ToolNode 示例 (Model: {model})")
     print(f"{'='*60}")
 
     run_part1()
