@@ -50,12 +50,15 @@ class Episode:
         )
 
 
-# 压缩提示词：要求 LLM 返回结构化 JSON
+# 压缩提示词：要求 LLM 返回结构化 JSON，强调简洁
 COMPACTION_PROMPT = (
-    "你是一个运维助手，请分析以下对话记录，生成结构化的摘要。\n\n"
-    "请提取以下信息并以 JSON 格式返回（不要使用 markdown 代码块标记）：\n"
-    "1. summary: 对话的核心内容摘要，保留关键的技术细节\n"
-    "2. key_facts: 重要的事实信息列表，如服务器配置、发现的根因、命令输出、系统状态等\n"
+    "你是一个运维助手，请分析以下对话记录，生成简洁的结构化摘要。\n\n"
+    "要求:\n"
+    "1. summary: 用 1-2 句话概括核心内容\n"
+    "2. key_facts: 只列出真正关键的事实（最多 3 条），如命令输出、根因等\n"
+    "3. decisions: 做出的决策（最多 2 条）\n"
+    "4. unresolved: 未解决的问题（最多 2 条）\n\n"
+    "以 JSON 格式返回（不要使用 markdown 代码块标记）：\n"
     "3. decisions: 做出的决策列表\n"
     "4. unresolved: 未解决的问题或待办事项列表\n\n"
     "JSON 格式示例：\n"
@@ -181,12 +184,13 @@ class EpisodicMemory:
 
     # ── 上下文格式化 ─────────────────────────────────
 
-    def format_for_context(self, k: int = 3) -> list[dict]:
+    def format_for_context(self, k: int = 1) -> list[dict]:
         """将最近 K 个 episode 格式化为 LLM 上下文消息。
+
+        每个 episode 的摘要截断到 200 字，关键事实最多 3 条。
 
         Returns:
             一条 assistant 角色的消息，包含所有摘要。
-            如果没有 episode，返回空列表。
         """
         episodes = self.get_recent_episodes(k)
         if not episodes:
@@ -194,16 +198,20 @@ class EpisodicMemory:
 
         parts = ["以下是之前对话中提取的历史摘要信息："]
         for i, ep in enumerate(episodes, 1):
-            time_str = time.strftime("%Y-%m-%d %H:%M",
-                                     time.localtime(ep.timestamp))
+            time_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(ep.timestamp))
             parts.append(f"\n--- 历史片段 {i} ({time_str}) ---")
-            parts.append(f"摘要: {ep.summary}")
-            if ep.key_facts:
-                parts.append(f"关键事实: {'; '.join(ep.key_facts)}")
-            if ep.decisions:
-                parts.append(f"决策: {'; '.join(ep.decisions)}")
-            if ep.unresolved:
-                parts.append(f"未解决: {'; '.join(ep.unresolved)}")
+            # 截断 summary
+            summary = ep.summary[:200] + "..." if len(ep.summary) > 200 else ep.summary
+            parts.append(f"摘要: {summary}")
+            # 最多 3 条 key_facts
+            for fact in ep.key_facts[:3]:
+                parts.append(f"  • {fact[:100]}")
+            # 最多 2 条 decisions
+            for dec in ep.decisions[:2]:
+                parts.append(f"  决策: {dec[:100]}")
+            # 最多 2 条 unresolved
+            for unr in ep.unresolved[:2]:
+                parts.append(f"  未解决: {unr[:100]}")
 
         return [{"role": "assistant", "content": "\n".join(parts)}]
 
