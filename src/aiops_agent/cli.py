@@ -1,26 +1,43 @@
 # d:\workspace\aiops-agent\src\aiops_agent\cli.py
-"""CLI 交互界面 — 配置驱动多 Agent 图编排。"""
+"""CLI 交互界面 — LangGraph StateGraph 多 Agent 编排。
 
-import operator
+设计要点:
+  1. AppState 包含 messages (LC) + memory_snapshot + agent_handoffs
+  2. 每个 Agent 节点独立绑定工具
+  3. Memory 从 State 中现场构建（build_memory_snapshot）
+  4. 所有消息格式统一为 langchain_core.messages 对象
+"""
+
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
+
+from langchain_core.tools import StructuredTool
 
 from . import __version__
 from .config import Config, _find_project_root
-from .core import Agent, AgentEvent
+from .core import Agent, AgentEvent, AgentHandoff
 from .llm import create_llm
-from .memory import Memory
-from .memory.tiered import TieredMemory
-from .tools import ShellTool, Tool
+from .tools.shell import execute_shell
+
+
+# ── 工具注册（LangChain StructuredTool）──
+
+TOOL_MAP: dict[str, StructuredTool] = {
+    "shell": StructuredTool.from_function(
+        name="shell",
+        description="执行 Shell 命令并返回输出。适用于查看系统状态、运行脚本、操作文件等。",
+        func=execute_shell,
+    ),
+}
 
 
 # ── Agent 配置 ──
-# 在此处定义 Agent 角色、提示词、和工具
-# 加 Agent = 加一条配置，改工具 = 改 tools 列表
 
 @dataclass
 class AgentDef:
@@ -30,25 +47,44 @@ class AgentDef:
 
 AGENT_DEFS: dict[str, AgentDef] = {
     "planner": AgentDef(
-        system_prompt="你是一个 AIOps 运维规划专家。分析用户的任务，制定一个清晰的执行计划，然后交给运维执行专家去执行。输出计划即可，不要执行工具。",
-        tools=[],  # 无工具，只做规划
+        system_prompt=(
+            "你是一个 AIOps 运维规划专家。你的职责:\n"
+            "1. 分析用户的任务\n"
+            "2. 制定清晰的执行计划\n"
+            "3. 交给运维执行专家去执行\n\n"
+            "不要执行工具，只需要输出规划。"
+        ),
+        tools=[],
     ),
     "worker": AgentDef(
-        system_prompt="你是一个 AIOps 运维执行专家。请按计划逐步执行运维操作，完成后给出最终报告。",
+        system_prompt=(
+            "你是一个 AIOps 运维执行专家。你的职责:\n"
+            "1. 按计划执行运维操作\n"
+            "2. 使用 shell 工具查看系统状态\n"
+            "3. 给出最终报告\n\n"
+            "执行完成后输出最终结果。"
+        ),
         tools=["shell"],
     ),
 }
 
-TOOL_MAP: dict[str, Tool] = {
-    "shell": ShellTool(),
+TOOL_MAP: dict[str, StructuredTool] = {
+    "shell": StructuredTool.from_function(
+        name="shell",
+        description="执行 Shell 命令并返回输出。适用于查看系统状态、运行脚本、操作文件等。",
+        func=execute_shell,
+    ),
 }
 
 
 # ── 全局状态 ──
 
 class AppState(TypedDict):
-    messages: Annotated[list, operator.add]
-    events: Annotated[list, operator.add]
+    messages: Annotated[list[BaseMessage], add_messages]
+    task: str                         # 用户原始任务
+    memory_snapshot: dict[str, Any]   # 现场构建的记忆快照
+    agent_handoffs: list[AgentHandoff]  # Agent 交接记录
+    reply: str                        # 最终回复
 
 
 # ── 数据目录 ──
@@ -62,7 +98,6 @@ BANNER = """
 ╔══════════════════════════════════════════╗
 ║           AIOps Agent v{version:<13}║
 ║   模型: {model:<29}║
-║   记忆: {memory:<29}║
 ║   模式: {mode:<29}║
 ║                                          ║
 ║   输入 /help 查看命令, /exit 退出         ║
@@ -74,24 +109,88 @@ HELP_TEXT = """
   /help              显示此帮助
   /exit              退出程序
   /tools             查看可用工具
-  /memory            查看三层记忆状态
-  /remember <事实>   添加核心记忆
-  /forget <事实>     删除核心记忆
-  /core              查看核心记忆列表
-  /clear             清空所有记忆
   /config            查看当前配置
 """
 
 
-# ── 工具描述 ──
+# ── Memory 快照（从 State 现场构建）──
 
-def _get_available_tools_text() -> str:
-    lines = []
-    for name, tool in TOOL_MAP.items():
-        params = tool.parameters.get("properties", {})
-        param_desc = ", ".join(f"{k}({v.get('type', '?')})" for k, v in params.items())
-        lines.append(f"  - {name}: {tool.description} 参数: {param_desc}")
-    return "\n".join(lines)
+def build_memory_snapshot(state: AppState, node: str) -> dict[str, Any]:
+    """从当前 State 构建三层记忆快照。"""
+    messages = state.get("messages", [])
+    task = state.get("task", "")
+
+    # 从消息中提取工作记忆
+    working = []
+    for msg in messages[-10:]:  # 最近 10 条
+        if isinstance(msg, HumanMessage):
+            working.append({"role": "user", "content": msg.content[:200]})
+        elif isinstance(msg, AIMessage):
+            working.append({"role": "assistant", "content": msg.content[:200] if msg.content else "(工具调用)"})
+
+    handoffs = []
+    for h in state.get("agent_handoffs", []):
+        handoffs.append(f"{h.from_agent} → {h.to_agent}: {h.instruction}")
+
+    return {
+        "node": node,
+        "task": task,
+        "working_memory": working,
+        "handoffs": handoffs,
+    }
+
+
+# ── 节点函数 ──
+
+def make_agent_node(name: str, agent: Agent, system_prompt: str):
+    """创建 Agent 节点函数。"""
+    def node_fn(state: AppState) -> dict:
+        # 构建输入消息（不含 system prompt，Agent 内部会加）
+        input_msgs: list[BaseMessage] = []
+
+        # 添加记忆快照作为 context
+        memory = build_memory_snapshot(state, node=name)
+        if memory.get("working_memory") or memory.get("handoffs"):
+            context_parts = []
+            if memory["handoffs"]:
+                context_parts.append("历史交接:\n" + "\n".join(memory["handoffs"]))
+            if memory["working_memory"]:
+                context_parts.append("最近对话:\n" + "\n".join(
+                    f"[{m['role']}]: {m['content']}" for m in memory["working_memory"]
+                ))
+            if context_parts:
+                input_msgs.append(HumanMessage(content="\n\n".join(context_parts)))
+
+        # 添加用户任务
+        task = state.get("task", "")
+        if task:
+            input_msgs.append(HumanMessage(content=task))
+
+        # 运行 Agent
+        produced_msgs, events = agent.run(input_msgs)
+
+        # 记录交接
+        handoff = AgentHandoff(
+            from_agent=name,
+            to_agent="",
+            instruction=f"处理任务: {task[:50]}",
+            result=next((m.content for m in produced_msgs if isinstance(m, AIMessage) and m.content), ""),
+        )
+
+        # 提取最终文本作为 reply
+        reply = ""
+        for m in reversed(produced_msgs):
+            if isinstance(m, AIMessage) and m.content:
+                reply = m.content
+                break
+
+        return {
+            "messages": produced_msgs,
+            "memory_snapshot": build_memory_snapshot({**state, "messages": state["messages"] + produced_msgs}, node=name),
+            "agent_handoffs": [handoff],
+            "reply": reply,
+        }
+    return node_fn
 
 
 # ── 事件打印 ──
@@ -109,129 +208,36 @@ def print_event(event: AgentEvent) -> None:
         print("─── 结束 ──────────────────────────", flush=True)
     elif event.type == "error":
         print(f"\n⚠️  {event.content}", flush=True)
+    elif event.type == "handoff":
+        print(f"\n🔄 {event.content}", flush=True)
 
 
-# ── 记忆创建 ──
+# ── 构建图 ──
 
-def _create_memory(config: Config, llm) -> Memory | None:
-    if config.memory_strategy == "tiered":
-        return TieredMemory(
-            llm=llm,
-            working_max_messages=config.memory_max_messages,
-            working_max_tokens=config.memory_max_tokens,
-            max_episodes=config.memory_max_episodes,
-            recent_episodes=config.memory_recent_episodes,
-            core_persist_path=DATA_DIR / "core_memory.json",
-            episodic_persist_path=DATA_DIR / "episodic_memory.json",
-            compaction_enabled=config.memory_compaction_enabled,
-        )
-    elif config.memory_strategy == "none":
-        return None
-    else:
-        print(f"⚠️ 未知的记忆策略 '{config.memory_strategy}'，使用 tiered")
-        return TieredMemory(
-            llm=llm,
-            core_persist_path=DATA_DIR / "core_memory.json",
-            episodic_persist_path=DATA_DIR / "episodic_memory.json",
-        )
-
-
-# ── 记忆命令 ──
-
-def _handle_memory_command(cmd_parts: list[str], memory: Memory | None) -> bool:
-    if memory is None:
-        return False
-    if not isinstance(memory, TieredMemory):
-        return False
-    if cmd_parts[0] in ("/remember", "/rem"):
-        if len(cmd_parts) < 2:
-            print("用法: /remember <事实内容>")
-            return True
-        memory.remember(" ".join(cmd_parts[1:]))
-        print(f"✅ 已记住")
-        return True
-    if cmd_parts[0] in ("/forget", "/for"):
-        if len(cmd_parts) < 2:
-            print("用法: /forget <事实内容>")
-            return True
-        if memory.forget(" ".join(cmd_parts[1:])):
-            print(f"✅ 已忘记")
-        else:
-            print(f"⚠️ 未找到")
-        return True
-    if cmd_parts[0] == "/core":
-        facts = memory.get_core_facts()
-        if facts:
-            print("\n  核心记忆:")
-            for i, f in enumerate(facts, 1):
-                print(f"    {i}. {f}")
-        else:
-            print("  核心记忆为空")
-        return True
-    return False
-
-
-# ── 图构建 ──
-
-def build_agents_and_graph(config: Config, llm, memory: Memory | None = None) -> tuple[StateGraph, dict[str, Agent]]:
+def build_graph(config: Config, llm) -> StateGraph:
     """根据配置创建 Agent 实例并构建 LangGraph 图。"""
     builder = StateGraph(AppState)
 
-    agents = {}
+    # 创建 Agent 实例并添加节点
     for name, adef in AGENT_DEFS.items():
         tools = [TOOL_MAP[t] for t in adef.tools]
-        agents[name] = Agent(
+        agent = Agent(
             name=name,
             system_prompt=adef.system_prompt,
             llm=llm,
             tools=tools,
             config=config,
-            memory=memory,
         )
+        builder.add_node(name, make_agent_node(name, agent, adef.system_prompt))
 
-    # 添加节点：每个 Agent 作为一个节点
-    for name in AGENT_DEFS:
-        agent = agents[name]
-
-        def make_node_fn(n: str, a: Agent):
-            def node_fn(state: AppState) -> dict:
-                # 从 state 中提取 user_input（可能是 dict 或 LangChain 消息）
-                user_msg = ""
-                for m in reversed(state["messages"]):
-                    if isinstance(m, dict):
-                        if m.get("role") == "user":
-                            user_msg = m.get("content", "")
-                            break
-                    elif hasattr(m, "content"):
-                        user_msg = m.content
-                        break
-                if not user_msg and state["messages"]:
-                    last = state["messages"][-1]
-                    if isinstance(last, dict):
-                        user_msg = last.get("content", "")
-                    else:
-                        user_msg = getattr(last, "content", str(last))
-
-                collected_events = []
-                for event in a.run(user_msg):
-                    collected_events.append({
-                        "type": event.type,
-                        "content": event.content,
-                        "data": event.data,
-                    })
-                return {"events": collected_events}
-            return node_fn
-
-        builder.add_node(name, make_node_fn(name, agent))
-
-    # 定义边：planner → worker → END
+    # 定义边
     names = list(AGENT_DEFS.keys())
     builder.set_entry_point(names[0])
     for i in range(len(names) - 1):
         builder.add_edge(names[i], names[i + 1])
     builder.add_edge(names[-1], END)
 
-    return builder.compile(), agents
+    return builder.compile()
 
 
 # ── 主入口 ──
@@ -245,18 +251,12 @@ def main() -> None:
         exit(1)
 
     llm = create_llm(config)
-    memory = _create_memory(config, llm)
-    memory_label = config.memory_strategy if memory else "none"
-
-    # 构建多 Agent 图
-    graph, agents = build_agents_and_graph(config, llm, memory)
+    graph = build_graph(config, llm)
     mode_label = " → ".join(AGENT_DEFS.keys())
-    tool_names = list(TOOL_MAP.keys())
 
     print(BANNER.format(
         version=__version__,
         model=config.model,
-        memory=memory_label,
         mode=mode_label,
     ))
 
@@ -272,12 +272,6 @@ def main() -> None:
 
         if user_input.startswith("/"):
             cmd = user_input.lower()
-            cmd_parts = cmd.split()
-
-            if cmd_parts[0] in ("/remember", "/rem", "/forget", "/for", "/core"):
-                _handle_memory_command(cmd_parts, memory)
-                continue
-
             if cmd in ("/exit", "/quit"):
                 print("再见！")
                 break
@@ -285,58 +279,57 @@ def main() -> None:
                 print(HELP_TEXT)
                 continue
             elif cmd == "/tools":
-                print(f"\n  可用工具: {', '.join(tool_names)}")
-                print(_get_available_tools_text())
-                continue
-            elif cmd == "/memory":
-                if isinstance(memory, TieredMemory):
-                    stats = memory.get_stats()
-                    print(f"\n  记忆系统: 三层记忆 (Three-Tier)")
-                    print(f"  ┌─ 工作记忆: {stats['working_messages']}/{stats['working_max_messages']} 条")
-                    print(f"  ├─ 情景记忆: {stats['episodic_count']} 个片段")
-                    print(f"  ├─ 核心记忆: {stats['core_facts']} 条事实")
-                else:
-                    print("  记忆未启用")
-                continue
-            elif cmd == "/clear":
-                if memory:
-                    memory.reset()
-                print("✅ 对话历史已清空")
+                print("\n  可用工具:")
+                for name, tool in TOOL_MAP.items():
+                    print(f"    • {name}: {tool.description}")
                 continue
             elif cmd == "/config":
                 print(f"\n  Provider: {config.llm_provider}")
                 print(f"  Model: {config.model}")
+                print(f"  Agent 模式: {mode_label}")
                 print(f"  最大工具轮次: {config.max_tool_rounds}")
-                print(f"  记忆策略: {config.memory_strategy}")
-                print(f"  多 Agent 模式: {mode_label}")
                 continue
             else:
                 print(f"未知命令: {user_input}，输入 /help 查看可用命令")
                 continue
 
-        # 运行多 Agent 图
+        # ── 运行图 ──
         try:
             state: AppState = {
                 "messages": [HumanMessage(content=user_input)],
-                "events": [],
+                "task": user_input,
+                "memory_snapshot": {},
+                "agent_handoffs": [],
+                "reply": "",
             }
-            current_agent_label = ""
-            for chunk in graph.stream(state):
+
+            current_node = ""
+            for chunk in graph.stream(state, stream_mode="updates"):
                 for node_name, updates in chunk.items():
-                    if node_name != current_agent_label:
-                        current_agent_label = node_name
+                    if node_name != current_node:
+                        current_node = node_name
                         print(f"\n{'='*50}", flush=True)
                         print(f"  🤖 [{node_name}]", flush=True)
                         print(f"{'='*50}", flush=True)
-                    for evt_data in updates.get("events", []):
-                        print_event(AgentEvent(
-                            type=evt_data["type"],
-                            content=evt_data["content"],
-                            data=evt_data.get("data", {}),
-                        ))
+
+                    # 从 updates 中提取事件并打印
+                    # Agent 节点的输出通过 messages 中的内容推断事件
+                    msgs = updates.get("messages", [])
+                    for msg in msgs:
+                        if isinstance(msg, AIMessage) and msg.content:
+                            print(f"\n{msg.content}", flush=True)
+
+            # 显示最终回复
+            final_reply = ""
+            for m in reversed(state.get("messages", [])):
+                if isinstance(m, AIMessage) and m.content:
+                    final_reply = m.content
+                    break
 
         except Exception as e:
-            print(f"\n❌ Agent 执行出错: {e}")
+            import traceback
+            print(f"\n❌ 执行出错: {e}")
+            traceback.print_exc()
 
 
 if __name__ == "__main__":

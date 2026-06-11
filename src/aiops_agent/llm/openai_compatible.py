@@ -13,6 +13,43 @@ from openai import OpenAI
 from .base import BaseLLM, LLMResponse, ToolCall
 
 
+def _lc_msg_to_dict(msg) -> dict:
+    """将 LangChain 消息对象转为 OpenAI API 所需的 dict 格式。"""
+    # LangChain 的类型名 → OpenAI 的 role 映射
+    role_map = {
+        "human": "user",
+        "ai": "assistant",
+        "system": "system",
+        "tool": "tool",
+    }
+    lc_type = getattr(msg, "type", "user")
+    role = role_map.get(lc_type, "user")
+    content = getattr(msg, "content", "")
+    result = {"role": role, "content": content or ""}
+
+    # AIMessage 可能有 tool_calls
+    tool_calls = getattr(msg, "tool_calls", None)
+    if tool_calls:
+        result["tool_calls"] = [
+            {
+                "id": tc["id"],
+                "type": "function",
+                "function": {
+                    "name": tc["name"],
+                    "arguments": json.dumps(tc["args"], ensure_ascii=False),
+                },
+            }
+            for tc in tool_calls
+        ]
+
+    # ToolMessage 有 tool_call_id
+    tool_call_id = getattr(msg, "tool_call_id", None)
+    if tool_call_id:
+        result["tool_call_id"] = tool_call_id
+
+    return result
+
+
 class OpenAICompatibleLLM(BaseLLM):
     """OpenAI 兼容接口的 LLM 适配器。"""
 
@@ -59,8 +96,15 @@ class OpenAICompatibleLLM(BaseLLM):
         messages: list[dict],
         tools: list[dict] | None = None,
     ) -> LLMResponse:
+        # 兼容 LangChain 消息对象
+        dict_messages = []
+        for m in messages:
+            if hasattr(m, "dict"):
+                dict_messages.append(_lc_msg_to_dict(m))
+            else:
+                dict_messages.append(m)
         raw = self.client.chat.completions.create(
-            messages=messages,
+            messages=dict_messages,
             **self._build_kwargs(tools),
         )
         return self._parse_response(raw)
