@@ -86,11 +86,33 @@ python -m aiops_agent
 | `/exit` | 退出程序 |
 | `/tools` | 查看可用工具 |
 | `/memory` | 查看三层记忆状态 |
-| `/remember <事实>` | 添加核心记忆 |
+| `/workspace` | 查看当前 Workspace ID 和路径 |
+| `/remember <事实>` | 添加核心记忆（跨会话持久） |
 | `/forget <事实>` | 删除核心记忆 |
 | `/core` | 查看核心记忆列表 |
-| `/clear` | 清空所有记忆 |
+| `/clear` | 清空当前会话记忆 |
 | `/config` | 查看当前配置 |
+
+### Workspace 沙箱
+
+每次启动自动创建独立的 Workspace 目录，隔离会话数据：
+
+```
+.aiops_data/
+├── core_memory.json              # 核心记忆 — 全局共享
+└── workspaces/
+    └── 20260611_143025/          # 每次启动自动创建
+        ├── episodic_memory.json  # 情景记忆 — 按 Workspace 隔离
+        └── ...                   # Agent 操作生成的文件
+```
+
+**沙箱规则：**
+
+| 操作 | Workspace 内 | Workspace 外 |
+|------|-------------|-------------|
+| `read_file` | ✅ 直接读取 | ⚠️ 需用户审批 |
+| `write_file` | ✅ 直接写入 | ⚠️ 需用户审批 |
+| `shell` | ✅ 默认 cwd 在 Workspace | 现有风险分级管控 |
 
 ### ReAct 模式
 

@@ -133,6 +133,10 @@ def build_graph(config: Config, llm, memory: TieredMemory) -> StateGraph:
                 if not input_msgs:
                     input_msgs = [HumanMessage(content=state.get("task", ""))]
 
+                # planner 只取本轮用户输入，避免看到之前轮次的执行细节后重复执行
+                if n == "planner":
+                    input_msgs = [HumanMessage(content=state.get("task", ""))]
+
                 # 从三层记忆注入额外上下文（core + episodic）
                 # 这些不是 LangGraph BaseMessage 类型，不放在 state["messages"] 里，
                 # 而是以 system/assistant dict 格式注入到 Agent.run() 的输入中
