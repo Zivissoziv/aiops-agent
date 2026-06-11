@@ -173,7 +173,7 @@ def _handle_memory_command(cmd_parts: list[str], memory: Memory | None) -> bool:
 
 # ── 图构建 ──
 
-def build_agents_and_graph(config: Config, llm) -> tuple[StateGraph, dict[str, Agent]]:
+def build_agents_and_graph(config: Config, llm, memory: Memory | None = None) -> tuple[StateGraph, dict[str, Agent]]:
     """根据配置创建 Agent 实例并构建 LangGraph 图。"""
     builder = StateGraph(AppState)
 
@@ -186,6 +186,7 @@ def build_agents_and_graph(config: Config, llm) -> tuple[StateGraph, dict[str, A
             llm=llm,
             tools=tools,
             config=config,
+            memory=memory,
         )
 
     # 添加节点：每个 Agent 作为一个节点
@@ -244,14 +245,13 @@ def main() -> None:
         exit(1)
 
     llm = create_llm(config)
-
-    # 构建多 Agent 图
-    graph, agents = build_agents_and_graph(config, llm)
-    mode_label = " → ".join(AGENT_DEFS.keys())
-    tool_names = list(TOOL_MAP.keys())
-
     memory = _create_memory(config, llm)
     memory_label = config.memory_strategy if memory else "none"
+
+    # 构建多 Agent 图
+    graph, agents = build_agents_and_graph(config, llm, memory)
+    mode_label = " → ".join(AGENT_DEFS.keys())
+    tool_names = list(TOOL_MAP.keys())
 
     print(BANNER.format(
         version=__version__,
