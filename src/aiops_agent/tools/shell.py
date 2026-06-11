@@ -81,11 +81,23 @@ def shell(command: str, timeout: int = 30) -> str:
 
     if is_dangerous:
         if _approval_hook:
+            # 审批钩子返回 None 表示需要用户确认（异步等待）
+            # 返回 True 表示已确认通过，False 表示拒绝
             approved = _approval_hook(command, level, reason)
+            if approved is None:
+                return json.dumps({
+                    "success": False,
+                    "error": f"⏳ 操作等待确认: {reason}\n请确认是否执行: {command}",
+                    "output": "",
+                    "need_approval": True,
+                    "command": command,
+                    "level": level,
+                    "reason": reason,
+                }, ensure_ascii=False)
             if not approved:
                 return json.dumps({
                     "success": False,
-                    "error": f"危险操作已被用户拒绝: {reason}",
+                    "error": f"操作已被用户拒绝: {reason}",
                     "output": "",
                 }, ensure_ascii=False)
         else:

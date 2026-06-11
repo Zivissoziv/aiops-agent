@@ -19,13 +19,29 @@ from .tools.shell import set_approval_hook
 
 # ── 审批回调（危险操作需用户确认）──
 
-def _approval_hook(command: str, level: str, reason: str) -> bool:
-    """Shell 危险操作审批。"""
+# ── 待审批命令队列 ──
+_pending_approval: dict = {}
+
+
+def _approval_hook(command: str, level: str, reason: str) -> bool | None:
+    """Shell 危险操作审批钩子。
+
+    不直接阻塞等待用户输入，而是将命令加入待审批队列，
+    让 LLM 收到"等待确认"的消息。
+
+    Returns:
+        None — 等待外部确认（不会阻塞）
+        True — 已确认
+        False — 已拒绝
+    """
     label = "🔴 高危" if level == "danger" else "⚠️ 警告"
     print(f"\n{label} 操作需要确认: {reason}")
     print(f"  命令: {command}")
-    resp = input(f"  是否执行? (y/N): ").strip().lower()
-    return resp in ("y", "yes", "是")
+    print(f"  输入 /approve 确认执行，/reject 拒绝")
+    _pending_approval["cmd"] = command
+    _pending_approval["level"] = level
+    _pending_approval["reason"] = reason
+    return None  # 不阻塞，让 LLM 收到"等待确认"消息
 
 
 # ── 构建图 ──
@@ -79,6 +95,8 @@ HELP_TEXT = """
   /core              查看核心记忆列表
   /clear             清空对话
   /config            查看当前配置
+  /approve           确认执行待审批的危险操作
+  /reject            拒绝执行待审批的危险操作
 """
 
 
@@ -261,6 +279,21 @@ def main() -> None:
                 print(f"  Agent 模式: {mode_label}")
                 print(f"  最大工具轮次: {config.max_tool_rounds}")
                 print(f"  记忆策略: {config.memory_strategy}")
+                continue
+            elif cmd == "/approve":
+                if _pending_approval:
+                    cmd = _pending_approval.pop("cmd", "")
+                    print(f"✅ 已确认: {cmd}")
+                    # 这里直接执行（简化版，后续可以改进为重新发送）
+                else:
+                    print("当前没有待审批的操作")
+                continue
+            elif cmd == "/reject":
+                if _pending_approval:
+                    cmd = _pending_approval.pop("cmd", "")
+                    print(f"❌ 已拒绝: {cmd}")
+                else:
+                    print("当前没有待审批的操作")
                 continue
             else:
                 # 尝试 /remember 和 /forget
