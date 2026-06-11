@@ -49,6 +49,9 @@ RISK_PATTERNS: list[tuple[str, str]] = [
     (r"\brm\b", "删除文件"),
     (r"\brmdir\b", "删除目录"),
     (r"\bRemove-Item\b", "删除文件"),
+    (r"\bmove\b", "移动文件"),
+    (r"\bcopy\b", "复制文件"),
+    (r"\brename\b", "重命名文件"),
 ]
 
 # 审批回调

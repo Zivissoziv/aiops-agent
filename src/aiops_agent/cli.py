@@ -105,12 +105,11 @@ def _build_planner_prompt() -> str:
     )
 
 
-def build_graph(config: Config, llm) -> StateGraph:
+def build_graph(config: Config, llm, memory: TieredMemory) -> StateGraph:
     builder = StateGraph(AppState)
 
     for adef in ALL_AGENTS:
         name = adef["name"]
-        # planner 的 system_prompt 动态生成
         if name == "planner" and adef.get("system_prompt") is None:
             sp = _build_planner_prompt()
         else:
@@ -119,7 +118,7 @@ def build_graph(config: Config, llm) -> StateGraph:
         tools = [TOOL_MAP[t] for t in adef["tools"]]
         agent = Agent(name=name, system_prompt=sp, llm=llm, tools=tools, config=config)
 
-        def make_node(n: str, a: Agent):
+        def make_node(n: str, a: Agent, mem: TieredMemory):
             def node_fn(state: AppState, writer: StreamWriter) -> dict:
                 writer({"type": "agent_start", "agent": n})
                 input_msgs = [HumanMessage(content=state.get("task", ""))]
@@ -130,14 +129,23 @@ def build_graph(config: Config, llm) -> StateGraph:
                         reply = m.content
                         break
 
+                # 同步到三层记忆
+                for msg in produced_msgs:
+                    if hasattr(msg, "type"):
+                        role_map = {"human": "user", "ai": "assistant", "tool": "tool"}
+                        role = role_map.get(getattr(msg, "type", ""), "assistant")
+                        if role == "tool":
+                            mem.add_message({"role": "tool", "content": msg.content, "tool_call_id": getattr(msg, "tool_call_id", "")})
+                        else:
+                            mem.add_message({"role": role, "content": msg.content or ""})
+                mem.check_compaction()
+
                 result = {}
 
-                # planner 节点：检查最后一行是否包含 NEED_WORKER
                 if n == "planner":
                     import re
                     todos = re.findall(r'- \[TODO\]\s*(.+)', reply)
                     result["todos"] = todos
-                    # 只检查最后 3 行（避免前文误匹配）
                     last_lines = reply.strip().split("\n")[-3:]
                     result["need_worker"] = any("[NEED_WORKER]" in line for line in last_lines)
                 else:
@@ -145,11 +153,9 @@ def build_graph(config: Config, llm) -> StateGraph:
 
                 result["messages"] = produced_msgs
                 return result
-
-                return result
             return node_fn
 
-        builder.add_node(name, make_node(name, agent))
+        builder.add_node(name, make_node(name, agent, memory))
 
     names = [a["name"] for a in ALL_AGENTS]
     builder.set_entry_point(names[0])
@@ -217,15 +223,23 @@ def main() -> None:
     memory = TieredMemory(
         llm=llm,
         compaction_enabled=True,
+        working_max_messages=2,
+        working_max_tokens=500,
         core_persist_path=DATA_DIR / "core_memory.json",
         episodic_persist_path=DATA_DIR / "episodic_memory.json",
     )
 
     # 注册 Shell 审批回调
-    from .tools.shell import configure_approval
-    configure_approval(handler=_approval_handler, mode="inline")
+    from .tools.shell import configure_approval as configure_shell_approval
+    configure_shell_approval(handler=_approval_handler, mode="inline")
 
-    graph = build_graph(config, llm)
+    # 注册文件写审批回调
+    from .tools.file_tools import configure_write_approval
+    configure_write_approval(lambda path, preview: _approval_handler(
+        f"write_file({path})", f"写入文件: {preview}"
+    ))
+
+    graph = build_graph(config, llm, memory)
     mode_label = " → ".join(a["name"] for a in ALL_AGENTS)
 
     print(BANNER.format(version=__version__, model=config.model, mode=mode_label))
