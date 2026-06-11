@@ -114,3 +114,50 @@ def write_file(path: str, content: str, append: bool = False) -> str:
         return f"错误: 无权限写入: {path}"
     except Exception as e:
         return f"错误: {e}"
+
+
+@tool
+def edit_file(path: str, old_text: str, new_text: str, dry_run: bool = False) -> str:
+    """编辑文件中的文本（精确替换）。适用于修改配置、修复 bug、重构代码等。
+    在工作区内的编辑直接执行，越界需用户确认。
+
+    Args:
+        path: 文件路径
+        old_text: 要替换的原始文本（必须在文件中唯一匹配）
+        new_text: 替换后的新文本
+        dry_run: 是否仅预览匹配结果而不实际写入，默认 False
+    """
+    # workspace 边界检查
+    if not _is_in_workspace(path):
+        if _write_approval_handler:
+            if not _write_approval_handler(path, f"编辑文件: {old_text[:50]}..."):
+                return f"⚠️ 用户拒绝了编辑 {path}"
+        else:
+            return f"错误: 路径不在工作区内且未配置审批回调: {path}"
+
+    try:
+        p = Path(path)
+        if not p.exists():
+            return f"错误: 文件不存在: {path}"
+        if not p.is_file():
+            return f"错误: 不是文件: {path}"
+
+        content = p.read_text(encoding="utf-8")
+        count = content.count(old_text)
+
+        if count == 0:
+            return f"错误: 未找到要替换的文本:\n```\n{old_text[:200]}\n```"
+        elif count > 1:
+            return f"错误: 找到 {count} 处匹配，请提供更多上下文使 old_text 唯一匹配:\n```\n{old_text[:200]}\n```"
+
+        if dry_run:
+            return f"✅ 将替换 1 处匹配:\n```\n{old_text[:200]}\n```\n→\n```\n{new_text[:200]}\n```"
+
+        new_content = content.replace(old_text, new_text, 1)
+        p.write_text(new_content, encoding="utf-8")
+        return f"✅ 已编辑 {path}（替换 1 处，{len(old_text)} → {len(new_text)} 字符）"
+
+    except PermissionError:
+        return f"错误: 无权限编辑: {path}"
+    except Exception as e:
+        return f"错误: {e}"
