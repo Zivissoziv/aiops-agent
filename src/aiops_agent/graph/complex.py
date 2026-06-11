@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.tools import StructuredTool
 from langgraph.graph import END, StateGraph
 from langgraph.types import StreamWriter
 
@@ -40,19 +41,8 @@ def _build_planner_prompt() -> str:
         "4. 不要指定具体的命令或参数，只需描述做什么即可\n\n"
         f"可用 Agent:\n{agent_descs}\n\n"
         f"Agent 名称: {agent_names}\n\n"
-        "在回复末尾用 ```json 代码块返回规划，格式:\n"
-        "```json\n"
-        "{\n"
-        '  "plan_summary": "一句话描述整体计划",\n'
-        '  "todos": [\n'
-        '    {"content": "步骤描述（不指定具体命令）", "assignee": "agent名称"},\n'
-        '    ...\n'
-        '  ],\n'
-        '  "need_worker": true\n'
-        "}\n"
-        "```\n\n"
-        "如果不需要其他 Agent 执行（如纯聊天、纯规划），need_worker 设为 false。\n"
-        "不要执行工具，只需要输出规划和 JSON。"
+        "使用 SubmitPlan 工具输出你的规划。如果不需要其他 Agent 执行"
+        "（如纯聊天、纯规划），need_worker 设为 false。不要执行其他工具。"
     )
 
 
@@ -132,9 +122,9 @@ def _make_node(name: str, agent: Agent, memory: TieredMemory):
         result: dict[str, Any] = {}
 
         if name == "planner":
-            parsed = _extract_json(reply)
-            if parsed:
-                raw_todos = parsed.get("todos") or []
+            # 优先从 tool call 读取 SubmitPlan 的结构化数据
+            plan = _extract_plan_from_tool_calls(produced_msgs)
+            if plan:
                 todos = [
                     {
                         "id": f"todo-{i+1}",
@@ -142,15 +132,31 @@ def _make_node(name: str, agent: Agent, memory: TieredMemory):
                         "assignee": str(todo.get("assignee", "worker")),
                         "status": "pending",
                     }
-                    for i, todo in enumerate(raw_todos)
+                    for i, todo in enumerate(plan.get("todos") or [])
                     if isinstance(todo, dict) and todo.get("content")
                 ]
                 result["todos"] = todos
-                result["need_worker"] = bool(parsed.get("need_worker")) and len(todos) > 0
+                result["need_worker"] = bool(plan.get("need_worker")) and len(todos) > 0
             else:
-                # JSON 解析失败，回退：默认有 worker
-                result["todos"] = _fallback_todos(reply)
-                result["need_worker"] = len(result["todos"]) > 0
+                # 回退：从文本中提取 JSON
+                parsed = _extract_json(reply)
+                if parsed:
+                    raw_todos = parsed.get("todos") or []
+                    todos = [
+                        {
+                            "id": f"todo-{i+1}",
+                            "content": str(todo.get("content", "")),
+                            "assignee": str(todo.get("assignee", "worker")),
+                            "status": "pending",
+                        }
+                        for i, todo in enumerate(raw_todos)
+                        if isinstance(todo, dict) and todo.get("content")
+                    ]
+                    result["todos"] = todos
+                    result["need_worker"] = bool(parsed.get("need_worker")) and len(todos) > 0
+                else:
+                    result["todos"] = _fallback_todos(reply)
+                    result["need_worker"] = len(result["todos"]) > 0
         else:
             result["need_worker"] = state.get("need_worker", True)
 
@@ -175,6 +181,9 @@ def build_complex_graph(config: Config, llm, memory: TieredMemory) -> StateGraph
             sp = adef["system_prompt"]
 
         tools = [TOOL_MAP[t] for t in adef["tools"]]
+        # planner 额外绑定 SubmitPlan 工具，强制结构化 JSON 输出
+        if name == "planner":
+            tools = [*tools, _build_submit_plan_tool()]
         agent = Agent(name=name, system_prompt=sp, llm=llm, tools=tools, config=config)
 
         builder.add_node(name, _make_node(name, agent, memory))
@@ -224,3 +233,47 @@ def _fallback_todos(reply: str) -> list[dict]:
         }
         for i, item in enumerate(items)
     ]
+
+
+# ── SubmitPlan Tool — 通过 tool calling 强制 JSON 结构化输出 ──
+
+
+from pydantic import BaseModel, Field
+
+
+class _TodoItem(BaseModel):
+    content: str = Field(description="步骤描述，不指定具体命令")
+    assignee: str = Field(description="执行此步骤的 Agent 名称")
+
+
+class _SubmitPlanArgs(BaseModel):
+    plan_summary: str = Field(description="一句话描述整体计划")
+    todos: list[_TodoItem] = Field(description="任务步骤列表")
+    need_worker: bool = Field(description="是否需要其他 Agent 执行")
+
+
+def _build_submit_plan_tool() -> StructuredTool:
+    """构建 SubmitPlan 工具，通过 tool calling 强制结构化 JSON 输出。"""
+    return StructuredTool.from_function(
+        name="SubmitPlan",
+        description="提交任务规划，包含步骤列表和是否需要其他 Agent 执行",
+        func=lambda **kwargs: json.dumps(kwargs, ensure_ascii=False),
+        args_schema=_SubmitPlanArgs,
+    )
+
+
+def _extract_plan_from_tool_calls(produced_msgs: list[BaseMessage]) -> dict | None:
+    """从 planner 的 tool_call 中提取 SubmitPlan 参数。
+
+    遍历 produced_msgs 中所有 AIMessage 的 tool_calls，
+    找到第一个 SubmitPlan 调用并返回其参数字典。
+    """
+    for msg in produced_msgs:
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            for tc in msg.tool_calls:
+                if hasattr(tc, "name"):
+                    if tc.name == "SubmitPlan":
+                        return tc.arguments
+                elif isinstance(tc, dict) and tc.get("name") == "SubmitPlan":
+                    return tc.get("args") or tc.get("arguments", {})
+    return None
