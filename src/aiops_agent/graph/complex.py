@@ -97,12 +97,6 @@ def _make_node(name: str, agent: Agent, memory: TieredMemory):
 
         produced_msgs, events = agent.run(input_msgs)
 
-        reply = ""
-        for m in reversed(produced_msgs):
-            if hasattr(m, "content") and m.content:
-                reply = m.content
-                break
-
         # 同步到三层记忆
         for msg in produced_msgs:
             if hasattr(msg, "type"):
@@ -122,41 +116,15 @@ def _make_node(name: str, agent: Agent, memory: TieredMemory):
         result: dict[str, Any] = {}
 
         if name == "planner":
-            # 优先从 tool call 读取 SubmitPlan 的结构化数据
             plan = _extract_plan_from_tool_calls(produced_msgs)
             if plan:
-                todos = [
-                    {
-                        "id": f"todo-{i+1}",
-                        "content": str(todo.get("content", "")),
-                        "assignee": str(todo.get("assignee", "worker")),
-                        "status": "pending",
-                    }
-                    for i, todo in enumerate(plan.get("todos") or [])
-                    if isinstance(todo, dict) and todo.get("content")
-                ]
+                raw_todos = plan.get("todos") or []
+                todos = _parse_todo_items(raw_todos)
                 result["todos"] = todos
                 result["need_worker"] = bool(plan.get("need_worker")) and len(todos) > 0
             else:
-                # 回退：从文本中提取 JSON
-                parsed = _extract_json(reply)
-                if parsed:
-                    raw_todos = parsed.get("todos") or []
-                    todos = [
-                        {
-                            "id": f"todo-{i+1}",
-                            "content": str(todo.get("content", "")),
-                            "assignee": str(todo.get("assignee", "worker")),
-                            "status": "pending",
-                        }
-                        for i, todo in enumerate(raw_todos)
-                        if isinstance(todo, dict) and todo.get("content")
-                    ]
-                    result["todos"] = todos
-                    result["need_worker"] = bool(parsed.get("need_worker")) and len(todos) > 0
-                else:
-                    result["todos"] = _fallback_todos(reply)
-                    result["need_worker"] = len(result["todos"]) > 0
+                result["todos"] = []
+                result["need_worker"] = False
         else:
             result["need_worker"] = state.get("need_worker", True)
 
@@ -202,65 +170,57 @@ def build_complex_graph(config: Config, llm, memory: TieredMemory) -> StateGraph
     return builder.compile()
 
 
-# ── JSON 解析 ──
+# ── TODO 解析 ──
 
 
-def _extract_json(text: str) -> dict[str, Any] | None:
-    """从模型回复中提取 JSON 对象（最外层大括号）。"""
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        return None
-    try:
-        parsed = json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+_TODO_PATTERN = r'\[(\w+)\]\s*(.+)'
 
 
-def _fallback_todos(reply: str) -> list[dict]:
-    """当 JSON 解析失败时，从旧格式文本中提取 TODO 作为回退。"""
+def _parse_todo_items(raw_todos: list[str]) -> list[dict]:
+    """将 SubmitPlan 返回的字符串 TODO 列表解析为标准结构。
+
+    输入: ["[worker] 查看磁盘使用率", "[worker] 检查日志"]
+    输出: [{id, content, assignee, status}, ...]
+    """
     import re
-    items = re.findall(r'- \[TODO\]\s*(.+)', reply)
-    if not items:
-        items = re.findall(r'- \*?\*?TODO\*?\*?\s*:?\s*(.+)', reply, re.IGNORECASE)
-    return [
-        {
-            "id": f"todo-{i+1}",
-            "content": item.strip(),
-            "assignee": "worker",
-            "status": "pending",
-        }
-        for i, item in enumerate(items)
-    ]
+    result = []
+    for i, item in enumerate(raw_todos):
+        m = re.match(_TODO_PATTERN, item.strip())
+        if m:
+            result.append({
+                "id": f"todo-{i+1}",
+                "content": m.group(2),
+                "assignee": m.group(1),
+                "status": "pending",
+            })
+        else:
+            result.append({
+                "id": f"todo-{i+1}",
+                "content": item.strip(),
+                "assignee": "worker",
+                "status": "pending",
+            })
+    return result
 
 
-# ── SubmitPlan Tool — 通过 tool calling 强制 JSON 结构化输出 ──
+# ── SubmitPlan Tool — 通过 tool calling 强制结构化输出 ──
 
 
 from pydantic import BaseModel, Field
 
 
-class _TodoItem(BaseModel):
-    content: str = Field(description="步骤描述，不指定具体命令")
-    assignee: str = Field(description="执行此步骤的 Agent 名称")
-
-
 class _SubmitPlanArgs(BaseModel):
     plan_summary: str = Field(description="一句话描述整体计划")
-    todos: list[_TodoItem] = Field(description="任务步骤列表")
-    need_worker: bool = Field(description="是否需要其他 Agent 执行")
+    todos: list[str] = Field(
+        description="任务步骤列表，每项格式为 '[agent名称] 步骤描述'，例如 '[worker] 查看磁盘使用率'"
+    )
+    need_worker: bool = Field(description="是否有 TODO 需要其他 Agent 执行")
 
 
 def _build_submit_plan_tool() -> StructuredTool:
-    """构建 SubmitPlan 工具，通过 tool calling 强制结构化 JSON 输出。"""
+    """构建 SubmitPlan 工具，通过 tool calling 强制结构化输出。"""
     def _submit_plan(**kwargs) -> str:
-        """将 SubmitPlan 参数序列化为 JSON。
-
-        kwargs 中的 Pydantic 对象（如 _TodoItem）需要先转为 dict。
-        """
-        serialized = _serialize_kwargs(kwargs)
-        return json.dumps(serialized, ensure_ascii=False)
+        return json.dumps(kwargs, ensure_ascii=False)
     return StructuredTool.from_function(
         name="SubmitPlan",
         description="提交任务规划，包含步骤列表和是否需要其他 Agent 执行",
@@ -269,28 +229,8 @@ def _build_submit_plan_tool() -> StructuredTool:
     )
 
 
-def _serialize_kwargs(kwargs: dict) -> dict:
-    """递归将 kwargs 中所有 Pydantic BaseModel 转为 dict。"""
-    result = {}
-    for key, value in kwargs.items():
-        if isinstance(value, list):
-            result[key] = [
-                item.model_dump() if isinstance(item, BaseModel) else item
-                for item in value
-            ]
-        elif isinstance(value, BaseModel):
-            result[key] = value.model_dump()
-        else:
-            result[key] = value
-    return result
-
-
 def _extract_plan_from_tool_calls(produced_msgs: list[BaseMessage]) -> dict | None:
-    """从 planner 的 tool_call 中提取 SubmitPlan 参数。
-
-    遍历 produced_msgs 中所有 AIMessage 的 tool_calls，
-    找到第一个 SubmitPlan 调用并返回其参数字典。
-    """
+    """从 planner 的 tool_call 中提取 SubmitPlan 参数。"""
     for msg in produced_msgs:
         if hasattr(msg, "tool_calls") and msg.tool_calls:
             for tc in msg.tool_calls:
