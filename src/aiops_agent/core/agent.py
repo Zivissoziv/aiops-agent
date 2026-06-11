@@ -249,4 +249,11 @@ class Agent:
 
         if self.memory is not None:
             return self.memory.get_messages()
-        return [_lc_to_dict(m) for m in state["messages"][1:] if not isinstance(m, (SystemMessage,))]
+        # 将最终消息转回 dict，兼容 dict 和 LC 消息混用
+        result = []
+        for m in state["messages"][1:]:
+            if isinstance(m, dict):
+                result.append(m)
+            elif not isinstance(m, SystemMessage):
+                result.append(_lc_to_dict(m))
+        return result
