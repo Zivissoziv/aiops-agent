@@ -34,6 +34,7 @@ class AppState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     task: str
     need_worker: bool
+    todos: list[str]
 
 
 # ── 数据目录 ──
@@ -67,34 +68,56 @@ HELP_TEXT = """
 """
 
 
-# ── 待审批队列 ──
-
-_pending_approval: dict = {}
-
-
 # ── 审批回调 ──
-
-def _approval_hook(command: str, level: str, reason: str):
-    """Shell 危险操作审批（不阻塞，返回 None 表示等待确认）。"""
-    label = "🔴 高危" if level == "danger" else "⚠️ 警告"
-    print(f"\n{label} 操作需要确认: {reason}")
+def _approval_handler(command: str, risk_reason: str) -> bool:
+    """Shell 高风险操作审批（阻塞等待用户输入）。"""
+    print(f"\n⚠️ 高风险操作需要确认: {risk_reason}")
     print(f"  命令: {command}")
-    print(f"  输入 /approve 确认，/reject 拒绝")
-    _pending_approval["cmd"] = command
-    _pending_approval["level"] = level
-    _pending_approval["reason"] = reason
-    return None
+    try:
+        resp = input(f"  是否执行? (y/N): ").strip().lower()
+        return resp in ("y", "yes", "是")
+    except (EOFError, KeyboardInterrupt):
+        return False
 
 
 # ── 构建图 ──
+
+def _build_planner_prompt() -> str:
+    """动态生成 planner 的 system_prompt，注入其他 Agent 的描述。"""
+    others = [a for a in ALL_AGENTS if a["name"] != "planner"]
+    agent_descs = "\n".join(
+        f"  - {a['name']}: {a.get('description', '未描述')}" for a in others
+    )
+    return (
+        "你是一个 AIOps 运维规划专家。你的职责:\n"
+        "1. 分析用户的任务\n"
+        "2. 将任务拆解为具体的 TODO 步骤，每个 TODO 一步操作\n"
+        "3. 用 [TODO] 标记每个步骤\n"
+        "4. 每行一个 TODO，格式: - [TODO] 具体操作描述\n"
+        "5. 根据任务类型，分配给合适的 Agent 执行\n\n"
+        f"可用 Agent:\n{agent_descs}\n\n"
+        "6. 如果任务无法由任何 Agent 完成（没有合适的工具），"
+        "直接告知用户原因，**不要**输出 [NEED_WORKER]\n"
+        "7. 如果任务可以分配给其他 Agent 执行，在**最后一行**单独输出 [NEED_WORKER]\n"
+        "8. 如果只是打招呼、问简单问题，直接回复即可\n"
+        "注意: [NEED_WORKER] 只能出现在最后一行，不要在前文出现\n\n"
+        "不要执行工具，只需要输出规划。"
+    )
+
 
 def build_graph(config: Config, llm) -> StateGraph:
     builder = StateGraph(AppState)
 
     for adef in ALL_AGENTS:
         name = adef["name"]
+        # planner 的 system_prompt 动态生成
+        if name == "planner" and adef.get("system_prompt") is None:
+            sp = _build_planner_prompt()
+        else:
+            sp = adef["system_prompt"]
+
         tools = [TOOL_MAP[t] for t in adef["tools"]]
-        agent = Agent(name=name, system_prompt=adef["system_prompt"], llm=llm, tools=tools, config=config)
+        agent = Agent(name=name, system_prompt=sp, llm=llm, tools=tools, config=config)
 
         def make_node(n: str, a: Agent):
             def node_fn(state: AppState, writer: StreamWriter) -> dict:
@@ -106,10 +129,24 @@ def build_graph(config: Config, llm) -> StateGraph:
                     if hasattr(m, "content") and m.content:
                         reply = m.content
                         break
-                return {
-                    "messages": produced_msgs,
-                    "need_worker": "[NEED_WORKER]" in reply if n == "planner" else state.get("need_worker", True),
-                }
+
+                result = {}
+
+                # planner 节点：检查最后一行是否包含 NEED_WORKER
+                if n == "planner":
+                    import re
+                    todos = re.findall(r'- \[TODO\]\s*(.+)', reply)
+                    result["todos"] = todos
+                    # 只检查最后 3 行（避免前文误匹配）
+                    last_lines = reply.strip().split("\n")[-3:]
+                    result["need_worker"] = any("[NEED_WORKER]" in line for line in last_lines)
+                else:
+                    result["need_worker"] = state.get("need_worker", True)
+
+                result["messages"] = produced_msgs
+                return result
+
+                return result
             return node_fn
 
         builder.add_node(name, make_node(name, agent))
@@ -130,12 +167,16 @@ def build_graph(config: Config, llm) -> StateGraph:
 
 # ── 事件渲染 ──
 
-def print_custom_event(event: dict):
-    """渲染 stream_mode='custom' 事件（实时工具调用等）。"""
+def print_custom_event(event: dict, _seen_agents: set = set()):
+    """渲染 stream_mode='custom' 事件。"""
     t = event.get("type")
     if t == "agent_start":
+        agent = event["agent"]
+        if agent in _seen_agents:
+            return
+        _seen_agents.add(agent)
         print(f"\n{'='*50}", flush=True)
-        print(f"  🤖 [{event['agent']}]", flush=True)
+        print(f"  🤖 [{agent}]", flush=True)
         print(f"{'='*50}", flush=True)
     elif t == "tool_start":
         print(f"\n🔧 正在使用工具: {event['tool']}", flush=True)
@@ -156,7 +197,8 @@ def print_graph_update(updates: dict):
     """渲染 stream_mode='updates' 事件（节点返回的文本消息）。"""
     for data in updates.values():
         for msg in data.get("messages", []):
-            if hasattr(msg, "content") and msg.content:
+            # 只显示 AI 回复的文本内容，不显示 system/tool/human
+            if hasattr(msg, "type") and msg.type == "ai" and msg.content:
                 print(f"\n{msg.content}", flush=True)
 
 
@@ -180,8 +222,8 @@ def main() -> None:
     )
 
     # 注册 Shell 审批回调
-    from .tools.shell import set_approval_hook
-    set_approval_hook(_approval_hook)
+    from .tools.shell import configure_approval
+    configure_approval(handler=_approval_handler, mode="inline")
 
     graph = build_graph(config, llm)
     mode_label = " → ".join(a["name"] for a in ALL_AGENTS)
@@ -236,19 +278,6 @@ def main() -> None:
                 print(f"\n  Provider: {config.llm_provider}")
                 print(f"  Model: {config.model}")
                 print(f"  Agent 模式: {mode_label}")
-                continue
-            elif cmd == "/approve":
-                if _pending_approval:
-                    print(f"✅ 已确认: {_pending_approval.pop('cmd', '')}")
-                    # 简化版：只是确认记录，后续迭代可改进
-                else:
-                    print("当前没有待审批的操作")
-                continue
-            elif cmd == "/reject":
-                if _pending_approval:
-                    print(f"❌ 已拒绝: {_pending_approval.pop('cmd', '')}")
-                else:
-                    print("当前没有待审批的操作")
                 continue
             else:
                 if cmd_parts[0] == "/remember" and len(cmd_parts) >= 2:

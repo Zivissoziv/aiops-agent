@@ -103,6 +103,12 @@ class Agent:
         except Exception:
             pass
 
+        # 发送 agent_start 事件
+        try:
+            writer({"type": "agent_start", "agent": self.name})
+        except Exception:
+            pass
+
         for _round in range(self.config.max_tool_rounds):
             response = self.llm.invoke(messages, tools=self._tool_defs or None)
 

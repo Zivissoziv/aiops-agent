@@ -1,58 +1,88 @@
 # d:\workspace\aiops-agent\src\aiops_agent\tools\shell.py
-"""Shell 命令执行工具（审批模式）。
+"""Shell 命令执行工具 — 风险分级 + 审批模式。
 
-危险操作需要用户确认后才执行。
+安全策略:
+  1. 危险命令（rm -rf、格式化等）→ 直接拒绝，不执行
+  2. 高风险命令（安装包、下载、写磁盘等）→ 需要用户审批
+  3. 普通命令（ls、df、ps 等）→ 直接放行
+
+审批模式:
+  - inline: 需要用户确认（默认）
+  - auto: 自动放行所有高风险命令
+  - deny: 自动拒绝所有高风险命令
 """
 
 import json
+import os
 import re
 import subprocess
 import time
+from dataclasses import dataclass, field
+from typing import Any, Callable
+from uuid import uuid4
 
 from langchain_core.tools import tool
 
-# ── 危险命令定义 ──
+# ── 风险模式 ──
 
-DANGEROUS_PATTERNS: list[dict] = [
-    {"pattern": r"rm\s+-rf", "level": "danger", "reason": "递归强制删除"},
-    {"pattern": r"mkfs\.|format", "level": "danger", "reason": "格式化磁盘"},
-    {"pattern": r"dd\s+if=", "level": "danger", "reason": "磁盘写入"},
-    {"pattern": r"shutdown|reboot|halt|poweroff", "level": "danger", "reason": "系统关机/重启"},
-    {"pattern": r"chmod\s+777|chown", "level": "warning", "reason": "修改权限"},
-    {"pattern": r"sudo|su\s", "level": "warning", "reason": "提权操作"},
-    {"pattern": r"useradd|userdel|passwd", "level": "danger", "reason": "用户管理"},
-    {"pattern": r"apt\s+(install|remove|purge)|yum\s+(install|remove)|pip\s+install", "level": "warning", "reason": "安装/卸载软件"},
-    {"pattern": r"docker\s+(rm|rmi|stop|kill)", "level": "warning", "reason": "Docker 管理"},
-    {"pattern": r"\bdanger\b", "level": "danger", "reason": "危险操作"},  # 占位，暂无匹配
-    {"pattern": r"wget.*\|\s*(ba|z)?sh|curl.*\|\s*(ba|z)?sh", "level": "danger", "reason": "远程脚本执行"},
+# 直接拒绝的危险模式（不执行、不审批）
+DANGEROUS_PATTERNS = [
+    r"\brm\s+-rf\b",
+    r"\bdel\s+(?:/[fqs]+\s*)+",  # del /f /s /q 等强制删除
+    r"\bRemove-Item\b.*\b-Recurse\b.*\b-Force\b",
+    r"\bmkfs\b",
+    r"\bformat\b",
+    r"\bshutdown\b",
+    r"\breboot\b",
+    r"\bdd\s+if=",
+    r":\s*\(\)\s*\{",
 ]
 
+# 需要审批的高风险模式
+RISK_PATTERNS: list[tuple[str, str]] = [
+    (r"\bsudo\b", "提权操作"),
+    (r"\b(?:pip|npm|apt|yum|brew|choco|scoop)\s+(?:install|remove|update|upgrade)\b", "安装/更新软件"),
+    (r"\b(?:curl|wget)\s+.*?(?:\||[`$])", "远程脚本执行"),
+    (r"\bchmod\s+777\b", "修改文件权限为 777"),
+    (r"\b>\s*(?:[A-Za-z]:\\)", "写入系统路径"),
+    (r"\bdel\b", "删除文件"),
+    (r"\brm\b", "删除文件"),
+    (r"\brmdir\b", "删除目录"),
+    (r"\bRemove-Item\b", "删除文件"),
+]
 
-def _check_dangerous(command: str) -> tuple[bool, str, str]:
-    """检查命令是否危险。
+# 审批回调
+_approval_handler: Callable | None = None
+_approval_mode: str = "inline"
 
-    Returns:
-        (is_dangerous, level, reason)
+
+def configure_approval(
+    handler: Callable | None = None,
+    mode: str = "inline",
+):
+    """配置审批回调。
+
+    handler(command, risk_reason) -> bool
+    mode: "inline" | "auto" | "deny"
     """
+    global _approval_handler, _approval_mode
+    _approval_handler = handler
+    _approval_mode = mode
+
+
+def _classify_command(command: str) -> tuple[str, str | None]:
+    """分类命令: ("danger"|"risk"|"safe", reason_or_None)"""
     cmd = command.strip()
-    for entry in DANGEROUS_PATTERNS:
-        if re.search(entry["pattern"], cmd):
-            return True, entry["level"], entry["reason"]
-    return False, "", ""
 
+    for pattern in DANGEROUS_PATTERNS:
+        if re.search(pattern, cmd):
+            return "danger", f"危险命令被拦截: {pattern}"
 
-# ── 全局审批缓存 ──
-# 在 CLI 中设置的审批函数
-_approval_hook = None
+    for pattern, reason in RISK_PATTERNS:
+        if re.search(pattern, cmd, re.IGNORECASE):
+            return "risk", reason
 
-
-def set_approval_hook(hook):
-    """设置审批回调函数。
-
-    hook(command, level, reason) -> bool
-    """
-    global _approval_hook
-    _approval_hook = hook
+    return "safe", None
 
 
 def _decode(data: bytes | None) -> str:
@@ -67,47 +97,40 @@ def _decode(data: bytes | None) -> str:
 
 
 @tool
-def shell(command: str, timeout: int = 30) -> str:
-    """执行 Shell 命令（审批模式）。
+def shell(command: str, timeout: int = 60) -> str:
+    """执行 Shell 命令（风险分级 + 审批模式）。
 
-    危险操作（删除、格式化、重启等）需要用户确认后才执行。
+    安全命令直接执行，高风险命令需要用户确认，危险命令直接拒绝。
 
     Args:
         command: 要执行的 Shell 命令
-        timeout: 超时时间（秒），默认 30
+        timeout: 超时时间（秒），默认 60
     """
-    # 安全检查
-    is_dangerous, level, reason = _check_dangerous(command)
+    # ── 风险分类 ──
+    level, reason = _classify_command(command)
 
-    if is_dangerous:
-        if _approval_hook:
-            # 审批钩子返回 None 表示需要用户确认（异步等待）
-            # 返回 True 表示已确认通过，False 表示拒绝
-            approved = _approval_hook(command, level, reason)
-            if approved is None:
-                return json.dumps({
-                    "success": False,
-                    "error": f"⏳ 操作等待确认: {reason}\n请确认是否执行: {command}",
-                    "output": "",
-                    "need_approval": True,
-                    "command": command,
-                    "level": level,
-                    "reason": reason,
-                }, ensure_ascii=False)
-            if not approved:
-                return json.dumps({
-                    "success": False,
-                    "error": f"操作已被用户拒绝: {reason}",
-                    "output": "",
-                }, ensure_ascii=False)
-        else:
+    if level == "danger":
+        return json.dumps({"success": False, "error": reason, "output": ""}, ensure_ascii=False)
+
+    if level == "risk":
+        if _approval_mode == "deny":
             return json.dumps({
                 "success": False,
-                "error": f"危险操作需要确认: {reason}（当前未设置审批回调）",
+                "error": f"高风险操作被自动拒绝: {reason}",
                 "output": "",
             }, ensure_ascii=False)
 
-    # 执行
+        if _approval_mode == "inline" and _approval_handler:
+            approved = _approval_handler(command, reason)
+            if not approved:
+                return json.dumps({
+                    "success": False,
+                    "error": f"用户拒绝了高风险操作: {reason}",
+                    "output": "",
+                }, ensure_ascii=False)
+        # auto 模式直接放行
+
+    # ── 执行 ──
     start = time.time()
     try:
         result = subprocess.run(
