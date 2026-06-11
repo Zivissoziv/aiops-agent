@@ -125,6 +125,9 @@ class Agent:
         self.llm = llm
         self.tool_registry = tool_registry
         self.memory = memory
+        # 统一工具定义：ToolNode 和 OpenAI API 共用
+        self._tool_funcs = [_make_tool_func(t) for t in tool_registry.list_tools()]
+        self._tool_defs = tool_registry.get_openai_tool_defs() or None
         self._graph = self._build_graph()
 
     def _get_tool_descriptions(self) -> str:
@@ -140,9 +143,7 @@ class Agent:
 
         builder.add_node("plan", self._plan)
         builder.add_node("call_model", self._call_model)
-        builder.add_node("tools", ToolNode([
-            _make_tool_func(t) for t in self.tool_registry.list_tools()
-        ]))
+        builder.add_node("tools", ToolNode(self._tool_funcs))
 
         builder.set_entry_point("plan")
 
@@ -205,7 +206,7 @@ class Agent:
             _lc_to_dict(m) if not isinstance(m, dict) else m
             for m in state["messages"]
         ]
-        tool_defs = self.tool_registry.get_openai_tool_defs() or None
+        tool_defs = self._tool_defs
 
         response = self.llm.invoke(dict_messages, tools=tool_defs)
 

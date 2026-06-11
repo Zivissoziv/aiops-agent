@@ -166,7 +166,7 @@ def run_part3():
         print("\n  ❌ 请安装依赖: pip install langgraph langchain-core")
         return
 
-    # ── Step 1: 定义工具函数（供 ToolNode 使用）──
+    # ── Step 1: 定义工具函数（供 ToolNode + OpenAI 共用）──
     print("\n  步骤 1: 定义工具函数")
 
     def shell_tool(command: str, timeout: int = 30) -> str:
@@ -174,12 +174,28 @@ def run_part3():
         result = execute_shell(command)
         return json.dumps({"output": result}, ensure_ascii=False)
 
-    # ToolNode 通过 __name__ 识别工具名
     shell_tool.__name__ = "shell"
     shell_tool.__doc__ = "执行 Shell 命令，查看系统状态"
 
-    print("    ✅ def shell_tool(command, timeout) -> str")
-    print("    ✅   __name__ = 'shell'  ← ToolNode 用这个识别工具")
+    # 工具定义（用于传给 OpenAI API 做 function calling）
+    TOOL_DEFS = [{
+        "type": "function",
+        "function": {
+            "name": "shell",
+            "description": "执行 Shell 命令，返回命令输出",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "要执行的命令"},
+                    "timeout": {"type": "integer", "description": "超时秒数", "default": 30},
+                },
+                "required": ["command"],
+            },
+        },
+    }]
+
+    print("    ✅ shell_tool 函数 + TOOL_DEFS 定义完成")
+    print("    ✅ ToolNode([shell_tool]) + OpenAI API 共用")
 
     # ── Step 2: 定义 State ──
     print("\n  步骤 2: 定义 State")
@@ -218,22 +234,8 @@ def run_part3():
             else:
                 dict_messages.append({"role": "user", "content": m.content})
 
-        # OpenAI 工具定义
-        tools = [{
-            "type": "function",
-            "function": {
-                "name": "shell",
-                "description": "执行 Shell 命令，返回命令输出",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {"type": "string", "description": "要执行的命令"},
-                        "timeout": {"type": "integer", "description": "超时秒数", "default": 30},
-                    },
-                    "required": ["command"],
-                },
-            },
-        }]
+        # OpenAI 工具定义（与 ToolNode 共用同一份）
+        tools = TOOL_DEFS
 
         response = client.chat.completions.create(
             model=model,
