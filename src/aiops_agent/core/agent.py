@@ -1,11 +1,12 @@
 # d:\workspace\aiops-agent\src\aiops_agent\core\agent.py
 """Agent 核心引擎（LangGraph 实现）。
 
-使用 LangGraph 状态机构造"思考-行动-观察"循环:
-  call_model → execute_tools → call_model → ... → END
+使用 LangGraph 状态机构造 Plan-then-Execute 循环:
+  plan → call_model → execute_tools → call_model → ... → END
 
 节点:
-  call_model    : 调用 LLM，追加回复到消息列表
+  plan          : 首次调用 LLM 做任务规划，生成执行计划
+  call_model    : 执行具体步骤（LLM 推理 + 工具调用决策）
   execute_tools : 执行所有 tool_calls，追加结果到消息列表
 
 条件边:
@@ -15,7 +16,7 @@
 
 import json
 import operator
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Annotated, Generator, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -31,7 +32,7 @@ from ..tools import ToolRegistry
 @dataclass
 class AgentEvent:
     """Agent 执行过程中发出的事件，供 CLI/UI 展示。"""
-    type: str  # "text" | "tool_start" | "tool_result" | "error" | "done"
+    type: str  # "plan" | "text" | "tool_start" | "tool_result" | "error" | "done"
     content: str = ""
     data: dict = field(default_factory=dict)
 
@@ -39,36 +40,24 @@ class AgentEvent:
 # ── LangGraph State ──
 
 class AgentState(TypedDict):
-    """LangGraph 状态定义。
-
-    messages: OpenAI 格式消息列表（用 operator.add 实现 reducer）
-    tool_round: 当前工具调用轮次
-    max_rounds: 最大轮次限制
-    events: 待输出的事件列表
-    system_prompt: system prompt 文本
-    llm: LLM 实例（序列化用，实际通过闭包访问）
-    tool_registry: 工具注册中心（通过闭包访问）
-    memory: 可选的记忆模块（通过闭包访问）
-    tool_defs: OpenAI 格式工具定义
-    """
+    """LangGraph 状态定义。"""
     messages: Annotated[list, operator.add]
     tool_round: int
     max_rounds: int
     events: Annotated[list, operator.add]
+    plan_done: bool  # plan 节点是否已执行
 
 
 # ── Agent 类 ──
 
 class Agent:
-    """Agent 核心引擎（LangGraph 实现）。
+    """Agent 核心引擎（LangGraph Plan-and-Execute）。
 
-    使用 LangGraph 状态机驱动"思考-行动-观察"循环。
-    保持与旧版相同的接口: __init__() + run()。
+    流程:
+      plan → call_model → execute_tools → call_model → ... → END
 
-    用法:
-      agent = Agent(config=config, llm=llm, tool_registry=registry, memory=memory)
-      for event in agent.run("查一下磁盘"):
-          print_event(event)
+    plan 节点只在第一次调用时生成任务规划，
+    后续 call_model 逐个执行计划步骤。
     """
 
     def __init__(
@@ -84,14 +73,39 @@ class Agent:
         self.memory = memory
         self._graph = self._build_graph()
 
+    def _get_tool_descriptions(self) -> str:
+        """生成工具描述文本，供 plan 节点参考。"""
+        lines = []
+        for tool in self.tool_registry.list_tools():
+            params = tool.parameters.get("properties", {})
+            param_desc = ", ".join(
+                f"{k}({v.get('type', '?')})" for k, v in params.items()
+            )
+            lines.append(f"  - {tool.name}: {tool.description} 参数: {param_desc}")
+        return "\n".join(lines)
+
     def _build_graph(self) -> StateGraph:
-        """构建 LangGraph 状态机图。"""
+        """构建 LangGraph 状态机图。
+
+        图结构:
+          plan (首次) → call_model → execute_tools → call_model (循环)
+                          ↓ (无 tool_calls)
+                         END
+        """
         builder = StateGraph(AgentState)
 
+        builder.add_node("plan", self._plan)
         builder.add_node("call_model", self._call_model)
         builder.add_node("execute_tools", self._execute_tools)
 
-        builder.set_entry_point("call_model")
+        builder.set_entry_point("plan")
+
+        # plan 执行完后根据 plan_done 决定是否跳过（已执行过则直接 call_model）
+        builder.add_conditional_edges(
+            "plan",
+            self._after_plan,
+            {"call_model": "call_model", "end": END},
+        )
 
         builder.add_conditional_edges(
             "call_model",
@@ -102,10 +116,60 @@ class Agent:
 
         return builder.compile()
 
-    # ── 节点函数 ──
+    # ── Plan 节点 ──
+
+    PLAN_PROMPT = """你是一个 AIOps 运维专家。请分析用户的任务，制定一个清晰的执行计划。
+
+可用工具:
+{tools}
+
+请输出:
+1. 任务分析: 理解用户需要什么
+2. 执行计划: 分步骤列出要做的操作（每步一个工具调用）
+3. 预期结果: 完成后能给用户什么信息
+
+注意: 不需要执行工具，只需要规划。"""
+
+    def _plan(self, state: AgentState) -> dict:
+        """节点: 首次调用 LLM 做任务规划。"""
+        tool_desc = self._get_tool_descriptions()
+        plan_prompt = self.PLAN_PROMPT.format(tools=tool_desc)
+
+        # 获取当前用户输入（messages 中最后一条 user 消息）
+        user_msg = ""
+        for m in reversed(state["messages"]):
+            if m.get("role") == "user":
+                user_msg = m.get("content", "")
+                break
+
+        messages = [
+            {"role": "system", "content": plan_prompt},
+            {"role": "user", "content": user_msg},
+        ]
+
+        response = self.llm.invoke(messages)
+        plan_text = response.content or ""
+
+        # 将规划结果作为一条 assistant 消息加入
+        plan_msg = {"role": "assistant", "content": f"[执行计划]\n{plan_text}"}
+
+        if self.memory is not None:
+            self.memory.add_message(plan_msg)
+
+        return {
+            "messages": [plan_msg],
+            "events": [{"type": "plan", "content": plan_text, "data": {}}],
+            "plan_done": True,
+        }
+
+    def _after_plan(self, state: AgentState) -> str:
+        """plan 后的条件边：已规划过则进入 call_model。"""
+        return "call_model"
+
+    # ── Call Model 节点 ──
 
     def _call_model(self, state: AgentState) -> dict:
-        """调用 LLM，将回复追加到消息列表。"""
+        """节点: 调用 LLM，将回复追加到消息列表。"""
         messages = state["messages"]
         tool_defs = self.tool_registry.get_openai_tool_defs()
         tool_defs = tool_defs or None
@@ -133,7 +197,6 @@ class Agent:
 
         events = []
 
-        # 输出文本事件
         if response.content:
             events.append({
                 "type": "text",
@@ -141,7 +204,6 @@ class Agent:
                 "data": {},
             })
 
-        # 同步到 memory
         if self.memory is not None:
             self.memory.add_message(assistant_msg)
 
@@ -150,8 +212,10 @@ class Agent:
             "events": events,
         }
 
+    # ── Execute Tools 节点 ──
+
     def _execute_tools(self, state: AgentState) -> dict:
-        """执行所有 tool_calls，追加结果到消息列表。"""
+        """节点: 执行所有 tool_calls，追加结果到消息列表。"""
         last_msg = state["messages"][-1]
         tool_calls = last_msg.get("tool_calls", [])
         events = []
@@ -162,32 +226,24 @@ class Agent:
             func_name = tc_data["function"]["name"]
             arguments = json.loads(tc_data["function"]["arguments"])
 
-            # 输出 tool_start 事件
             events.append({
                 "type": "tool_start",
                 "content": f"🔧 正在使用工具: {func_name}({json.dumps(arguments, ensure_ascii=False)})",
                 "data": {"tool_name": func_name, "arguments": arguments},
             })
 
-            # 执行工具
             result = self.tool_registry.execute_tool(func_name, arguments)
 
-            # 构建 tool 消息
             tool_msg = {
                 "role": "tool",
                 "tool_call_id": tc_id,
                 "content": json.dumps(
-                    {
-                        "success": result.success,
-                        "output": result.output,
-                        "error": result.error,
-                    },
+                    {"success": result.success, "output": result.output, "error": result.error},
                     ensure_ascii=False,
                 ),
             }
             tool_messages.append(tool_msg)
 
-            # 输出 tool_result 事件
             display_output = result.error if not result.success else result.output
             events.append({
                 "type": "tool_result",
@@ -199,18 +255,13 @@ class Agent:
                 },
             })
 
-            # 同步到 memory
             if self.memory is not None:
                 self.memory.add_message(tool_msg)
 
-        # 压缩检查
         if self.memory is not None:
             self._check_compaction()
 
-        return {
-            "messages": tool_messages,
-            "events": events,
-        }
+        return {"messages": tool_messages, "events": events}
 
     def _should_continue(self, state: AgentState) -> str:
         """条件边：决定继续执行工具还是结束。"""
@@ -223,7 +274,6 @@ class Agent:
         return "end"
 
     def _check_compaction(self) -> None:
-        """检查并执行记忆压缩（如果 memory 支持）。"""
         if hasattr(self.memory, 'check_compaction'):
             self.memory.check_compaction()
 
@@ -234,19 +284,7 @@ class Agent:
         user_input: str,
         history: list[dict] | None = None,
     ) -> Generator[AgentEvent, None, list[dict]]:
-        """运行 Agent 主循环。
-
-        Args:
-            user_input: 用户输入
-            history: 历史消息列表（仅在无 memory 时使用）
-
-        Yields:
-            供 UI 展示的 AgentEvent
-
-        Returns:
-            更新后的消息历史
-        """
-        # 构建初始消息列表
+        """运行 Agent（Plan-and-Execute）。"""
         if self.memory is not None:
             self.memory.add_message({"role": "user", "content": user_input})
             base_messages = [
@@ -261,22 +299,20 @@ class Agent:
                 {"role": "user", "content": user_input},
             ]
 
-        # 初始状态
         initial_state: AgentState = {
             "messages": base_messages,
             "tool_round": 0,
             "max_rounds": self.config.max_tool_rounds,
             "events": [],
+            "plan_done": False,
         }
 
-        # 运行 LangGraph 图
         current_state = initial_state
-        max_iterations = self.config.max_tool_rounds + 2  # 安全限制
+        max_iterations = self.config.max_tool_rounds + 3
         for _ in range(max_iterations):
             next_state = self._graph.invoke(current_state)
             current_state = next_state
 
-            # 收集并输出事件
             for evt_data in next_state.get("events", []):
                 yield AgentEvent(
                     type=evt_data["type"],
@@ -284,31 +320,22 @@ class Agent:
                     data=evt_data["data"],
                 )
 
-            # 检查是否应该结束
             last_msg = next_state["messages"][-1]
             has_tool_calls = bool(last_msg.get("tool_calls"))
             if not has_tool_calls:
                 break
 
-            # 增加 tool_round
             current_state["tool_round"] = current_state.get("tool_round", 0) + 1
 
-            # 检查是否超限
             if current_state["tool_round"] >= self.config.max_tool_rounds:
-                yield AgentEvent(
-                    type="error",
-                    content=f"⚠️ 已达到最大工具调用轮次（{self.config.max_tool_rounds}），请尝试拆分任务。",
-                )
+                yield AgentEvent(type="error", content=f"⚠️ 已达到最大工具调用轮次（{self.config.max_tool_rounds}）。")
                 break
         else:
-            yield AgentEvent(
-                type="error",
-                content=f"⚠️ 已达到最大迭代次数，请尝试拆分任务。",
-            )
+            yield AgentEvent(type="error", content="⚠️ 已达到最大迭代次数。")
 
         yield AgentEvent(type="done", content="")
 
-        # 返回更新后的历史
         if self.memory is not None:
             return self.memory.get_messages()
         return current_state["messages"][1:]
+

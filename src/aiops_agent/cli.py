@@ -42,7 +42,9 @@ HELP_TEXT = """
 
 def print_event(event: AgentEvent) -> None:
     """格式化输出 Agent 事件。"""
-    if event.type == "text":
+    if event.type == "plan":
+        print(f"\n📋 执行计划\n{event.content}", flush=True)
+    elif event.type == "text":
         print(f"\n助手: {event.content}", flush=True)
     elif event.type == "tool_start":
         print(f"\n{event.content}", flush=True)
