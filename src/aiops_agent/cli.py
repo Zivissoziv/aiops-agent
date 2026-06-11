@@ -14,6 +14,21 @@ from .config import Config, _find_project_root
 from .core import Agent, AgentEvent, AgentHandoff
 from .llm import create_llm
 from .memory.tiered import TieredMemory
+from .tools.shell import set_approval_hook
+
+
+# ── 审批回调（危险操作需用户确认）──
+
+def _approval_hook(command: str, level: str, reason: str) -> bool:
+    """Shell 危险操作审批。"""
+    label = "🔴 高危" if level == "danger" else "⚠️ 警告"
+    print(f"\n{label} 操作需要确认: {reason}")
+    print(f"  命令: {command}")
+    resp = input(f"  是否执行? (y/N): ").strip().lower()
+    return resp in ("y", "yes", "是")
+
+
+# ── 构建图 ──
 from .tools import get_tools as get_all_tools
 
 
@@ -175,6 +190,9 @@ def main() -> None:
         exit(1)
 
     llm = create_llm(config)
+
+    # 注册 Shell 审批回调
+    set_approval_hook(_approval_hook)
 
     # 创建三层记忆
     memory = TieredMemory(
