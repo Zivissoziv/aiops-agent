@@ -6,7 +6,10 @@ CLI 通过 stream_mode=["updates", "custom"] 消费。
 """
 
 import json
+import logging
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
@@ -65,8 +68,8 @@ class Agent:
         # 发送 tool_start 事件
         try:
             writer({"type": "tool_start", "tool": tool_name, "args": tool_args, "agent": self.name})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("writer tool_start 事件发送失败: %s", e)
 
         # 执行
         result_str = tool.invoke(tool_args)
@@ -82,8 +85,8 @@ class Agent:
                 "error": parsed.get("error", "")[:200],
                 "agent": self.name,
             })
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("writer tool_result 事件发送失败: %s", e)
 
         return result_str
 
@@ -100,14 +103,8 @@ class Agent:
         # 发送 agent_start 事件
         try:
             writer({"type": "agent_start", "agent": self.name})
-        except Exception:
-            pass
-
-        # 发送 agent_start 事件
-        try:
-            writer({"type": "agent_start", "agent": self.name})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("writer agent_start 事件发送失败: %s", e)
 
         for _round in range(self.config.max_tool_rounds):
             response = self.llm.invoke(messages, tools=self._tool_defs or None)

@@ -11,7 +11,10 @@
 """
 
 import json
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 # 核心记忆在上下文中显示时的标题
@@ -97,5 +100,5 @@ class CoreMemory:
         try:
             with open(self._persist_path, "w", encoding="utf-8") as f:
                 json.dump(self._facts, f, ensure_ascii=False, indent=2)
-        except IOError:
-            pass
+        except IOError as e:
+            logger.warning("核心记忆持久化写入失败 (%s): %s", self._persist_path, e)

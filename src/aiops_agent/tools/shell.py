@@ -13,13 +13,10 @@
 """
 
 import json
-import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass, field
-from typing import Any, Callable
-from uuid import uuid4
+from typing import Callable
 
 from langchain_core.tools import tool
 
@@ -44,9 +41,9 @@ RISK_PATTERNS: list[tuple[str, str]] = [
     (r"\b(?:pip|npm|apt|yum|brew|choco|scoop)\s+(?:install|remove|update|upgrade)\b", "安装/更新软件"),
     (r"\b(?:curl|wget)\s+.*?(?:\||[`$])", "远程脚本执行"),
     (r"\bchmod\s+777\b", "修改文件权限为 777"),
-    (r"\b>\s*(?:[A-Za-z]:\\)", "写入系统路径"),
-    (r"\bdel\b", "删除文件"),
-    (r"\brm\b", "删除文件"),
+    (r">\s*(?:[A-Za-z]:\\)", "写入系统路径"),
+    (r"\bdel\s+", "删除文件"),
+    (r"\brm\s+", "删除文件"),
     (r"\brmdir\b", "删除目录"),
     (r"\bRemove-Item\b", "删除文件"),
     (r"\bmove\b", "移动文件"),

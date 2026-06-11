@@ -13,7 +13,10 @@ from openai import OpenAI
 from .base import BaseLLM, LLMResponse, ToolCall
 
 
-def _lc_msg_to_dict(msg) -> dict:
+from langchain_core.messages import BaseMessage
+
+
+def _lc_msg_to_dict(msg: BaseMessage) -> dict:
     """将 LangChain 消息对象转为 OpenAI API 所需的 dict 格式。"""
     # LangChain 的类型名 → OpenAI 的 role 映射
     role_map = {
@@ -25,6 +28,13 @@ def _lc_msg_to_dict(msg) -> dict:
     lc_type = getattr(msg, "type", "user")
     role = role_map.get(lc_type, "user")
     content = getattr(msg, "content", "")
+    # 处理列表格式的 content（如多模态消息）
+    if isinstance(content, list):
+        texts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                texts.append(part.get("text", ""))
+        content = " ".join(texts)
     result = {"role": role, "content": content or ""}
 
     # AIMessage 可能有 tool_calls

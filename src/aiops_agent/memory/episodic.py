@@ -12,10 +12,13 @@
 """
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -58,9 +61,7 @@ COMPACTION_PROMPT = (
     "2. key_facts: 只列出真正关键的事实（最多 3 条），如命令输出、根因等\n"
     "3. decisions: 做出的决策（最多 2 条）\n"
     "4. unresolved: 未解决的问题（最多 2 条）\n\n"
-    "以 JSON 格式返回（不要使用 markdown 代码块标记）：\n"
-    "3. decisions: 做出的决策列表\n"
-    "4. unresolved: 未解决的问题或待办事项列表\n\n"
+    "以 JSON 格式返回（不要使用 markdown 代码块标记）：\n\n"
     "JSON 格式示例：\n"
     '{"summary": "...", "key_facts": ["..."], "decisions": ["..."], "unresolved": ["..."]}\n\n'
     "请确保 JSON 是有效的，不要包含对话中未提到的信息。"
@@ -237,5 +238,5 @@ class EpisodicMemory:
                     [ep.to_dict() for ep in self._episodes],
                     f, ensure_ascii=False, indent=2,
                 )
-        except IOError:
-            pass
+        except IOError as e:
+            logger.warning("情景记忆持久化写入失败 (%s): %s", self._persist_path, e)

@@ -1,10 +1,11 @@
 # d:\workspace\aiops-agent\src\aiops_agent\cli.py
 """CLI — LangGraph 流式事件消费 + 审批回调。"""
 
+import re
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, TypedDict
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
@@ -17,6 +18,8 @@ from .core import Agent
 from .llm import create_llm
 from .memory.tiered import TieredMemory
 from .tools import get_tools
+from .tools.file_tools import configure_write_approval
+from .tools.shell import configure_approval as configure_shell_approval
 
 
 # ── 工具注册 ──
@@ -25,9 +28,6 @@ TOOL_MAP: dict[str, StructuredTool] = get_tools()
 
 
 # ── 全局状态 ──
-
-from typing import Annotated, TypedDict
-from langchain_core.messages import BaseMessage
 
 
 class AppState(TypedDict):
@@ -173,14 +173,18 @@ def build_graph(config: Config, llm, memory: TieredMemory) -> StateGraph:
 
 # ── 事件渲染 ──
 
-def print_custom_event(event: dict, _seen_agents: set = set()):
+# 跟踪已渲染过的 agent，避免重复打印
+_seen_agents_in_session: set[str] = set()
+
+
+def print_custom_event(event: dict):
     """渲染 stream_mode='custom' 事件。"""
     t = event.get("type")
     if t == "agent_start":
         agent = event["agent"]
-        if agent in _seen_agents:
+        if agent in _seen_agents_in_session:
             return
-        _seen_agents.add(agent)
+        _seen_agents_in_session.add(agent)
         print(f"\n{'='*50}", flush=True)
         print(f"  🤖 [{agent}]", flush=True)
         print(f"{'='*50}", flush=True)
@@ -230,11 +234,9 @@ def main() -> None:
     )
 
     # 注册 Shell 审批回调
-    from .tools.shell import configure_approval as configure_shell_approval
     configure_shell_approval(handler=_approval_handler, mode="inline")
 
     # 注册文件写审批回调
-    from .tools.file_tools import configure_write_approval
     configure_write_approval(lambda path, preview: _approval_handler(
         f"write_file({path})", f"写入文件: {preview}"
     ))

@@ -13,7 +13,6 @@
   working_memory 消息（当前对话）
 """
 
-import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any

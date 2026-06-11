@@ -27,6 +27,7 @@ class WorkingMemory:
         keep_system: bool = True,
     ):
         self._messages: list[dict] = []
+        self._last_compact_indices: list[int] = []
         self.max_messages = max_messages
         self.max_tokens = max_tokens
         self.keep_system = keep_system
@@ -105,7 +106,7 @@ class WorkingMemory:
 
     def prune_compacted(self) -> None:
         """从工作记忆中移除已压缩的消息。"""
-        if not hasattr(self, '_last_compact_indices') or not self._last_compact_indices:
+        if not self._last_compact_indices:
             return
         compact_set = set(self._last_compact_indices)
         self._messages = [
