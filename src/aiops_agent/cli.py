@@ -1,44 +1,26 @@
 # d:\workspace\aiops-agent\src\aiops_agent\cli.py
-"""CLI — LangGraph 流式事件消费 + 审批回调。"""
+"""CLI — LangGraph 流式事件消费 + 审批回调。
 
-import re
+双 Graph 架构：
+  1. Entry Graph（意图路由） → intent_router → chat_responder（chat 路由）或 END（task 路由）
+  2. Complex Graph（任务执行） → planner → worker
+"""
+
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.tools import StructuredTool
-from langgraph.graph import END, StateGraph
-from langgraph.graph.message import add_messages
-from langgraph.types import StreamWriter
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from . import __version__
 from .agents import ALL_AGENTS
 from .config import Config, _find_project_root
-from .core import Agent
-from .core.intent_router import classify_intent
+from .graph import AppState, build_complex_graph, build_entry_graph
 from .llm import create_llm
 from .memory.tiered import TieredMemory
-from .tools import get_tools
 from .tools.file_tools import configure_write_approval
 from .tools.file_tools import configure_workspace as configure_file_workspace
 from .tools.shell import configure_approval as configure_shell_approval
 from .tools.shell import configure_workspace as configure_shell_workspace
-
-
-# ── 工具注册 ──
-
-TOOL_MAP: dict[str, StructuredTool] = get_tools()
-
-
-# ── 全局状态 ──
-
-
-class AppState(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
-    task: str
-    need_worker: bool
-    todos: list[str]
 
 
 # ── 数据目录 ──
@@ -88,122 +70,6 @@ def _approval_handler(command: str, risk_reason: str) -> bool:
         return False
 
 
-# ── 构建图 ──
-
-def _build_planner_prompt() -> str:
-    """动态生成 planner 的 system_prompt，注入其他 Agent 的描述。"""
-    others = [a for a in ALL_AGENTS if a["name"] != "planner"]
-    agent_descs = "\n".join(
-        f"  - {a['name']}: {a.get('description', '未描述')}" for a in others
-    )
-    return (
-        "你是一个 AIOps 运维规划专家。你的职责:\n"
-        "1. 分析用户的任务\n"
-        "2. 将任务拆解为具体的 TODO 步骤，每个 TODO 一步操作\n"
-        "3. 用 [TODO] 标记每个步骤\n"
-        "4. 每行一个 TODO，格式: - [TODO] 具体操作描述\n"
-        "5. 根据任务类型，分配给合适的 Agent 执行\n\n"
-        f"可用 Agent:\n{agent_descs}\n\n"
-        "6. 如果任务无法由任何 Agent 完成（没有合适的工具），"
-        "直接告知用户原因，**不要**输出 [NEED_WORKER]\n"
-        "7. 如果任务可以分配给其他 Agent 执行，在**最后一行**单独输出 [NEED_WORKER]\n"
-        "8. 如果只是打招呼、问简单问题，直接回复即可\n"
-        "注意: [NEED_WORKER] 只能出现在最后一行，不要在前文出现\n\n"
-        "不要执行工具，只需要输出规划。"
-    )
-
-
-def build_graph(config: Config, llm, memory: TieredMemory) -> StateGraph:
-    builder = StateGraph(AppState)
-
-    for adef in ALL_AGENTS:
-        name = adef["name"]
-        if name == "planner" and adef.get("system_prompt") is None:
-            sp = _build_planner_prompt()
-        else:
-            sp = adef["system_prompt"]
-
-        tools = [TOOL_MAP[t] for t in adef["tools"]]
-        agent = Agent(name=name, system_prompt=sp, llm=llm, tools=tools, config=config)
-
-        def make_node(n: str, a: Agent, mem: TieredMemory):
-            def node_fn(state: AppState, writer: StreamWriter) -> dict:
-                writer({"type": "agent_start", "agent": n})
-                # 从 state 获取本轮对话历史
-                input_msgs: list[BaseMessage] = list(state.get("messages", []))
-                if not input_msgs:
-                    input_msgs = [HumanMessage(content=state.get("task", ""))]
-
-                # planner 只取本轮用户输入，避免看到之前轮次的执行细节后重复执行
-                if n == "planner":
-                    input_msgs = [HumanMessage(content=state.get("task", ""))]
-
-                # 从三层记忆注入额外上下文（core + episodic）
-                # 这些不是 LangGraph BaseMessage 类型，不放在 state["messages"] 里，
-                # 而是以 system/assistant dict 格式注入到 Agent.run() 的输入中
-                mem_context = mem.get_messages()
-                # 过滤出 system（core）和 assistant（episodic）角色的消息
-                extra_context = [m for m in mem_context if m.get("role") in ("system", "assistant")]
-                if extra_context:
-                    # 转为 BaseMessage 注入
-                    ctx_msgs: list[BaseMessage] = []
-                    for ctx in extra_context:
-                        if ctx["role"] == "system":
-                            from langchain_core.messages import SystemMessage
-                            ctx_msgs.append(SystemMessage(content=ctx["content"]))
-                        elif ctx["role"] == "assistant":
-                            ctx_msgs.append(AIMessage(content=ctx["content"]))
-                    input_msgs = [*ctx_msgs, *input_msgs]
-
-                produced_msgs, events = a.run(input_msgs)
-                reply = ""
-                for m in reversed(produced_msgs):
-                    if hasattr(m, "content") and m.content:
-                        reply = m.content
-                        break
-
-                # 同步到三层记忆
-                for msg in produced_msgs:
-                    if hasattr(msg, "type"):
-                        role_map = {"human": "user", "ai": "assistant", "tool": "tool"}
-                        role = role_map.get(getattr(msg, "type", ""), "assistant")
-                        if role == "tool":
-                            mem.add_message({"role": "tool", "content": msg.content, "tool_call_id": getattr(msg, "tool_call_id", "")})
-                        else:
-                            mem.add_message({"role": role, "content": msg.content or ""})
-                mem.check_compaction()
-
-                result = {}
-
-                if n == "planner":
-                    import re
-                    todos = re.findall(r'- \[TODO\]\s*(.+)', reply)
-                    result["todos"] = todos
-                    last_lines = reply.strip().split("\n")[-3:]
-                    result["need_worker"] = any("[NEED_WORKER]" in line for line in last_lines)
-                else:
-                    result["need_worker"] = state.get("need_worker", True)
-
-                result["messages"] = produced_msgs
-                return result
-            return node_fn
-
-        builder.add_node(name, make_node(name, agent, memory))
-
-    names = [a["name"] for a in ALL_AGENTS]
-    builder.set_entry_point(names[0])
-
-    if len(names) >= 2:
-        def route(state: AppState) -> str:
-            return names[1] if state.get("need_worker", True) else END
-        builder.add_conditional_edges(names[0], route, {names[1]: names[1], END: END})
-        for i in range(1, len(names) - 1):
-            builder.add_edge(names[i], names[i + 1])
-        builder.add_edge(names[-1], END)
-
-    return builder.compile()
-
-
 # ── 事件渲染 ──
 
 # 跟踪已渲染过的 agent，避免重复打印
@@ -213,7 +79,14 @@ _seen_agents_in_session: set[str] = set()
 def print_custom_event(event: dict):
     """渲染 stream_mode='custom' 事件。"""
     t = event.get("type")
-    if t == "agent_start":
+    if t == "intent_decision":
+        route = event.get("route", "")
+        confidence = event.get("confidence", 0.0)
+        reason = event.get("reason", "")
+        print(f"\n📋 路由: [{route}] 置信度={confidence:.2f} 理由: {reason}")
+    elif t == "chat_response":
+        pass  # chat 回复由 print_graph_update 渲染
+    elif t == "agent_start":
         agent = event["agent"]
         if agent in _seen_agents_in_session:
             return
@@ -240,9 +113,17 @@ def print_graph_update(updates: dict):
     """渲染 stream_mode='updates' 事件（节点返回的文本消息）。"""
     for data in updates.values():
         for msg in data.get("messages", []):
-            # 只显示 AI 回复的文本内容，不显示 system/tool/human
             if hasattr(msg, "type") and msg.type == "ai" and msg.content:
                 print(f"\n{msg.content}", flush=True)
+
+
+def _build_session_context(state: AppState) -> str:
+    """从 state 中的 messages 构建多轮对话上下文摘要。"""
+    session_msgs = []
+    for m in state.get("messages", []):
+        if hasattr(m, "type") and m.type in ("human", "ai") and m.content:
+            session_msgs.append(f"[{m.type}]: {str(m.content)[:200]}")
+    return "\n".join(session_msgs[-6:]) if session_msgs else ""
 
 
 # ── 主入口 ──
@@ -280,7 +161,8 @@ def main() -> None:
     # 注册 shell workspace 默认工作目录
     configure_shell_workspace(WORKSPACE_DIR)
 
-    graph = build_graph(config, llm, memory)
+    entry_graph = build_entry_graph(llm, memory)
+    complex_graph = build_complex_graph(config, llm, memory)
     mode_label = " → ".join(a["name"] for a in ALL_AGENTS)
 
     print(BANNER.format(version=__version__, model=config.model, mode=mode_label, workspace=WORKSPACE_ID))
@@ -288,8 +170,7 @@ def main() -> None:
     # ── 主循环 ──
 
     # state 全程持续存在，每轮只追加当前输入
-    # 启动时从 TieredMemory 恢复历史对话（只恢复 user/assistant/tool，不恢复 core/episodic）
-    # core 和 episodic 会在 make_node 中通过 mem.get_messages() 注入
+    # 启动时从 TieredMemory 恢复历史对话
     working_history = memory.working.get_messages()
     restored_messages: list[BaseMessage] = []
     for m in working_history:
@@ -299,12 +180,19 @@ def main() -> None:
             restored_messages.append(AIMessage(content=m.get("content", "")))
         elif m.get("role") == "tool":
             tid = m.get("tool_call_id", "")
-            restored_messages.append(ToolMessage(content=m.get("content", ""), tool_call_id=tid))
+            tname = m.get("name", "")
+            restored_messages.append(ToolMessage(content=m.get("content", ""), tool_call_id=tid, name=tname or None))
 
     state: AppState = {
         "messages": restored_messages,
         "task": "",
         "need_worker": False,
+        "todos": [],
+        "intent_route": "",
+        "intent_reason": "",
+        "intent_confidence": 0.0,
+        "chat_response": "",
+        "session_context": "",
     }
 
     while True:
@@ -317,6 +205,7 @@ def main() -> None:
         if not user_input:
             continue
 
+        # ── 斜杠命令（不走 graph） ──
         if user_input.startswith("/"):
             cmd = user_input.lower()
             cmd_parts = cmd.split()
@@ -328,6 +217,7 @@ def main() -> None:
                 print(HELP_TEXT)
                 continue
             elif cmd == "/tools":
+                from .graph.complex import TOOL_MAP
                 print(f"\n  可用工具: {', '.join(TOOL_MAP.keys())}")
                 continue
             elif cmd == "/memory":
@@ -374,49 +264,50 @@ def main() -> None:
                 print(f"未知命令: {user_input}")
                 continue
 
-        # ── 意图路由 ──
-        # 简单关键词快速跳过路由（包含工具关键词的不用调 LLM 分类）
-        task_keywords = [
-            "查", "看", "读", "写", "创建", "删除", "修改", "编辑", "运行", "执行",
-            "安装", "下载", "搜索", "分析", "检测", "检查", "排查", "修复",
-            "shell", "read", "write", "edit", "ls", "cat", "grep", "ping",
-            "磁盘", "内存", "cpu", "进程", "日志", "配置", "文件", "目录",
-            "docker", "k8s", "pod", "service", "deploy",
-        ]
-        if not any(kw in user_input for kw in task_keywords):
-            intent = classify_intent(llm, user_input)
+        # ── Step 1: Entry Graph — 意图路由 ──
+        state["task"] = user_input
+        state["session_context"] = _build_session_context(state)
+        state["chat_response"] = ""
+        state["intent_route"] = ""
+        state["intent_reason"] = ""
+        state["intent_confidence"] = 0.0
 
-            if intent["route"] == "chat":
-                chat_system = "你是一个 AIOps 运维助手。直接友好地回复用户的问题。不要提及工具、文件操作或工作区。"
-                response = llm.invoke([
-                    SystemMessage(content=chat_system),
-                    HumanMessage(content=user_input),
-                ])
-                reply_text = (response.content or "").strip()
-                print(f"\n{reply_text}")
-                memory.add_message({"role": "user", "content": user_input})
-                memory.add_message({"role": "assistant", "content": reply_text})
-                continue
-
-        # ── 运行图（双模式流）──
+        route = "task"
         try:
-            # 每轮重置 seen_agents，让 agent_start banner 重新显示
+            for mode, event in entry_graph.stream(state, stream_mode=["updates", "custom"]):
+                if mode == "custom":
+                    print_custom_event(event)
+                    if isinstance(event, dict) and event.get("type") == "intent_decision":
+                        route = str(event.get("route") or "task")
+                elif mode == "updates":
+                    print_graph_update(event)
+        except Exception as e:
+            import traceback
+            print(f"\n❌ 入口路由出错: {e}")
+            traceback.print_exc()
+            route = "task"  # 路由失败时默认走 task
+
+        # ── Step 2: 根据路由结果分流 ──
+        if route == "chat":
+            # 回复已由 print_graph_update 渲染（chat_responder 返回 AIMessage 在 messages 中）
+            # memory 也已在 entry graph 的 chat_responder 节点中同步
+            continue
+
+        # ── Step 3: Complex Graph — 任务执行 ──
+        # 将用户输入追加到 state["messages"]，让 worker 能感知原始请求
+        user_msg = HumanMessage(content=user_input)
+        state["messages"] = list(state["messages"]) + [user_msg]
+
+        try:
             _seen_agents_in_session.clear()
 
-            # 将当前用户输入追加到持续存在的 state 中
-            new_msg = HumanMessage(content=user_input)
-            state["messages"].append(new_msg)
-            state["task"] = user_input
-            state["need_worker"] = False
-
-            for mode, event in graph.stream(state, stream_mode=["updates", "custom"]):
+            for mode, event in complex_graph.stream(state, stream_mode=["updates", "custom"]):
                 if mode == "custom":
                     print_custom_event(event)
                 elif mode == "updates":
                     print_graph_update(event)
 
-            # graph.stream 结束后，将本轮用户输入同步到 TieredMemory
-            # （AI 回复已在 make_node 中同步）
+            # 图中的 make_node 只同步 AI/tool 消息，用户消息需在此同步
             memory.add_message({"role": "user", "content": user_input})
 
         except Exception as e:

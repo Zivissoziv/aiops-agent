@@ -1,35 +1,97 @@
 """意图路由 — 判断用户输入是闲聊还是工作任务。"""
 
-INTENT_ROUTER_PROMPT = """你是一个意图分类器。判断用户最新输入属于哪一类：
+import json
+from typing import Any
 
-- chat: 打招呼、感谢、询问身份、简单问答等不需要操作工作区的纯对话
-- task: 需要读写文件、执行命令、查询系统信息、安装软件等需要工具操作的任务
+from langchain_core.messages import HumanMessage, SystemMessage
 
-只返回以下 JSON 格式（不要加其他内容）：
-{"route": "chat" | "task", "reason": "简短原因"}
+INTENT_ROUTER_PROMPT = """You are the intent router for AIOps Agent.
 
-如果不确定，选 task。"""
+Classify the user's latest input into exactly one route:
+
+- chat: greetings, thanks, identity/help questions, ordinary conceptual Q&A, or conversational messages that do not need workspace access or tool execution.
+- task: any request that needs creating/editing/reading files, running commands, installing packages, searching the web, checking system status, analyzing logs, or producing a concrete deliverable.
+
+When session context is provided, use it only to understand whether the latest
+input is a continuation of prior coding/work tasks. A short follow-up like
+"继续", "修一下", "运行测试", "continue", "fix it", or "run tests" should be
+**task** if it refers to prior workspace work.
+
+Return only JSON with this shape:
+{"route":"chat"|"task","reason":"brief reason","confidence":0.0}
+
+If uncertain, choose task.
+"""
 
 
-def classify_intent(llm, user_input: str, history_hint: str = "") -> dict:
-    """判断用户意图，返回 {"route": ..., "reason": ...}"""
-    from langchain_core.messages import HumanMessage, SystemMessage
+def classify_intent(
+    llm,
+    user_input: str,
+    session_context: str = "",
+) -> dict[str, Any]:
+    """判断用户意图，返回 {"route": ..., "reason": ..., "confidence": ...}。
 
-    messages = [
-        SystemMessage(content=INTENT_ROUTER_PROMPT),
-    ]
-    if history_hint:
-        messages.append(SystemMessage(content=f"对话历史摘要: {history_hint}"))
-    messages.append(HumanMessage(content=user_input))
+    支持 MokioAgent 风格的结构化 JSON 输出 + 置信度门控：
+    - confidence >= 0.55 时信任模型分类
+    - 低于阈值 → 默认走 task（安全回退）
+    - 异常 → 默认走 task
+    """
+    route = "task"
+    reason = "router fallback: default to task"
+    confidence = 0.0
 
-    import json
     try:
-        response = llm.invoke(messages)
-        parsed = json.loads(response.content.strip())
-        route = parsed.get("route", "task")
-        reason = parsed.get("reason", "")
-        if route not in ("chat", "task"):
-            route = "task"
-        return {"route": route, "reason": reason, "raw": response.content.strip()[:200]}
-    except Exception as e:
-        return {"route": "task", "reason": f"路由解析失败: {e}"}
+        parts = [f"User input:\n{user_input}"]
+        if session_context:
+            parts.append(f"Session context:\n{session_context}")
+        prompt_input = "\n\n".join(parts)
+
+        response = llm.invoke([
+            SystemMessage(content=INTENT_ROUTER_PROMPT),
+            HumanMessage(content=prompt_input),
+        ])
+        parsed = _extract_json(str(response.content)) or {}
+        candidate = str(parsed.get("route", "")).strip().lower()
+        parsed_confidence = _coerce_confidence(parsed.get("confidence"))
+
+        if candidate in {"chat", "task"} and parsed_confidence >= 0.55:
+            route = candidate
+            confidence = parsed_confidence
+            reason = str(parsed.get("reason") or "")
+        else:
+            reason = str(parsed.get("reason") or "router returned low-confidence or invalid route")
+            confidence = parsed_confidence
+    except Exception as exc:
+        reason = f"router error: {type(exc).__name__}: {exc}"
+
+    return {
+        "route": route,
+        "reason": reason,
+        "confidence": confidence,
+    }
+
+
+def _extract_json(text: str) -> dict[str, Any] | None:
+    """从模型回复中提取 JSON 对象。
+
+    使用 rfind 找最外层大括号，对 LLM 输出的简单 JSON 更鲁棒，
+    不会因 reason 字段中包含 {} 字符而截断。
+    """
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return None
+    try:
+        parsed = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _coerce_confidence(value: Any) -> float:
+    """将任意值转换为 [0.0, 1.0] 范围的置信度分数。"""
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, confidence))

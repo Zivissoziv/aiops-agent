@@ -36,6 +36,17 @@ def _is_in_workspace(path: str | Path) -> bool:
         return False
 
 
+def _check_workspace_access(path: str, desc: str) -> str | None:
+    """检查路径越界，返回 None 表示允许访问，返回字符串表示拒绝原因。"""
+    if _is_in_workspace(path):
+        return None
+    if _write_approval_handler:
+        if not _write_approval_handler(path, desc):
+            return f"⚠️ 用户拒绝了 {path}"
+        return None
+    return f"错误: 路径不在工作区内且未配置审批回调: {path}"
+
+
 @tool
 def read_file(path: str, lines: int = 50) -> str:
     """读取文件内容，返回前 N 行。
@@ -46,13 +57,10 @@ def read_file(path: str, lines: int = 50) -> str:
         path: 文件路径
         lines: 读取的行数，默认 50
     """
-    # workspace 边界检查：越界路径需要审批
-    if not _is_in_workspace(path):
-        if _write_approval_handler:
-            if not _write_approval_handler(path, f"读取文件（前 {lines} 行）"):
-                return f"⚠️ 用户拒绝了读取 {path}"
-        else:
-            return f"错误: 路径不在工作区内且未配置审批回调: {path}"
+    denied = _check_workspace_access(path, f"读取文件（前 {lines} 行）")
+    if denied:
+        return denied
+
     try:
         p = Path(path)
         if not p.exists():
@@ -88,14 +96,9 @@ def write_file(path: str, content: str, append: bool = False) -> str:
         content: 要写入的内容
         append: 是否追加到文件末尾，默认 False（覆盖写入）
     """
-    # workspace 边界检查：越界路径需要审批
-    if not _is_in_workspace(path):
-        if _write_approval_handler:
-            preview = content[:100]
-            if not _write_approval_handler(path, preview):
-                return f"⚠️ 用户拒绝了写入 {path}"
-        else:
-            return f"错误: 路径不在工作区内且未配置审批回调: {path}"
+    denied = _check_workspace_access(path, content[:100] if content else "")
+    if denied:
+        return denied
 
     try:
         p = Path(path)
@@ -127,13 +130,9 @@ def edit_file(path: str, old_text: str, new_text: str, dry_run: bool = False) ->
         new_text: 替换后的新文本
         dry_run: 是否仅预览匹配结果而不实际写入，默认 False
     """
-    # workspace 边界检查
-    if not _is_in_workspace(path):
-        if _write_approval_handler:
-            if not _write_approval_handler(path, f"编辑文件: {old_text[:50]}..."):
-                return f"⚠️ 用户拒绝了编辑 {path}"
-        else:
-            return f"错误: 路径不在工作区内且未配置审批回调: {path}"
+    denied = _check_workspace_access(path, f"编辑文件: {old_text[:50]}...")
+    if denied:
+        return denied
 
     try:
         p = Path(path)
