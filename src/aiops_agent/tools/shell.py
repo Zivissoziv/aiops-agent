@@ -16,6 +16,7 @@ import json
 import re
 import subprocess
 import time
+from pathlib import Path
 from typing import Callable
 
 from langchain_core.tools import tool
@@ -54,6 +55,13 @@ RISK_PATTERNS: list[tuple[str, str]] = [
 # 审批回调
 _approval_handler: Callable | None = None
 _approval_mode: str = "inline"
+_workspace_path: str | None = None
+
+
+def configure_workspace(workspace_path: str | Path | None) -> None:
+    """设置 shell 默认工作目录。"""
+    global _workspace_path
+    _workspace_path = str(workspace_path) if workspace_path else None
 
 
 def configure_approval(
@@ -135,6 +143,7 @@ def shell(command: str, timeout: int = 60) -> str:
     try:
         result = subprocess.run(
             command, shell=True, capture_output=True, timeout=timeout,
+            cwd=_workspace_path,
         )
         elapsed = time.time() - start
         stdout = _decode(result.stdout)

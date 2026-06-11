@@ -4,6 +4,8 @@
 """
 
 import json
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +14,8 @@ from src.aiops_agent.tools.shell import (
     RISK_PATTERNS,
     _classify_command,
     _decode,
+    configure_workspace,
+    shell,
 )
 
 
@@ -76,8 +80,6 @@ class TestClassifyCommand:
     def test_safe_del_in_word(self):
         """确保 'del' 在单词中间时不误报。"""
         level, reason = _classify_command("cat model.py")
-        # 'model' 包含 'del'，但如果没有空格在 del 后面，不应匹配
-        # 由于正则改为 \bdel\s+，model 后面的 "." 不匹配
         assert level == "safe"
 
     def test_dangerous_fork_bomb(self):
@@ -126,3 +128,31 @@ class TestRiskPatternsCoverage:
         import re
         for pattern in DANGEROUS_PATTERNS:
             re.compile(pattern)  # 不应抛异常
+
+
+class TestWorkspaceCwd:
+    """测试 workspace 默认工作目录。"""
+
+    @pytest.fixture(autouse=True)
+    def setup_and_cleanup(self):
+        configure_workspace(None)
+        yield
+        configure_workspace(None)
+
+    def test_shell_runs_in_workspace_cwd(self):
+        """shell 的默认工作目录是 workspace 目录。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            # 在 workspace 里创建一个文件
+            (ws / "marker.txt").write_text("hello", encoding="utf-8")
+            configure_workspace(str(ws))
+
+            result = json.loads(shell.invoke({"command": "ls marker.txt"}))
+            assert result["success"]
+            assert "marker.txt" in result["output"]
+
+    def test_shell_without_workspace_still_works(self):
+        """不设 workspace 时行为不变。"""
+        result = json.loads(shell.invoke({"command": "echo hello"}))
+        assert result["success"]
+        assert "hello" in result["output"]
