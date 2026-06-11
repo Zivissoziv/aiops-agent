@@ -14,18 +14,12 @@ from .config import Config, _find_project_root
 from .core import Agent, AgentEvent, AgentHandoff
 from .llm import create_llm
 from .memory.tiered import TieredMemory
-from .tools.shell import execute_shell
+from .tools import get_tools as get_all_tools
 
 
-# ── 工具注册 ──
+# ── 工具注册（自动扫描）──
 
-TOOL_MAP: dict[str, StructuredTool] = {
-    "shell": StructuredTool.from_function(
-        name="shell",
-        description="执行 Shell 命令并返回输出。适用于查看系统状态、运行脚本、操作文件等。",
-        func=execute_shell,
-    ),
-}
+TOOL_MAP: dict[str, StructuredTool] = get_all_tools()
 
 from .agents import ALL_AGENTS
 

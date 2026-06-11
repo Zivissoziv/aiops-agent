@@ -63,3 +63,8 @@ def execute_shell(command: str, timeout: int = 30) -> str:
             "output": "",
             "execution_time": time.time() - start,
         }, ensure_ascii=False)
+
+
+def get_tools() -> list:
+    """返回此模块中所有工具函数。"""
+    return [execute_shell]
