@@ -20,7 +20,9 @@ from .llm import create_llm
 from .memory.tiered import TieredMemory
 from .tools import get_tools
 from .tools.file_tools import configure_write_approval
+from .tools.file_tools import configure_workspace as configure_file_workspace
 from .tools.shell import configure_approval as configure_shell_approval
+from .tools.shell import configure_workspace as configure_shell_workspace
 
 
 # ── 工具注册 ──
@@ -265,10 +267,13 @@ def main() -> None:
     # 注册 Shell 审批回调
     configure_shell_approval(handler=_approval_handler, mode="inline")
 
-    # 注册文件写审批回调
+    # 注册文件工具 workspace 沙箱 + 越界审批回调
+    configure_file_workspace(WORKSPACE_DIR)
     configure_write_approval(lambda path, preview: _approval_handler(
-        f"write_file({path})", f"写入文件: {preview}"
+        f"访问文件({path})", f"workspace 外路径: {preview}"
     ))
+    # 注册 shell workspace 默认工作目录
+    configure_shell_workspace(WORKSPACE_DIR)
 
     graph = build_graph(config, llm, memory)
     mode_label = " → ".join(a["name"] for a in ALL_AGENTS)
