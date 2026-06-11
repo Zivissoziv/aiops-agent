@@ -2,6 +2,7 @@
 """Complex Workflow — planner → worker 执行链。"""
 
 import json
+import re
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -95,7 +96,7 @@ def _make_node(name: str, agent: Agent, memory: TieredMemory):
                     ctx_msgs.append(AIMessage(content=ctx["content"]))
             input_msgs = [*ctx_msgs, *input_msgs]
 
-        produced_msgs, events = agent.run(input_msgs)
+        produced_msgs, _ = agent.run(input_msgs)
 
         # 同步到三层记忆
         for msg in produced_msgs:
@@ -182,24 +183,15 @@ def _parse_todo_items(raw_todos: list[str]) -> list[dict]:
     输入: ["[worker] 查看磁盘使用率", "[worker] 检查日志"]
     输出: [{id, content, assignee, status}, ...]
     """
-    import re
     result = []
     for i, item in enumerate(raw_todos):
         m = re.match(_TODO_PATTERN, item.strip())
-        if m:
-            result.append({
-                "id": f"todo-{i+1}",
-                "content": m.group(2),
-                "assignee": m.group(1),
-                "status": "pending",
-            })
-        else:
-            result.append({
-                "id": f"todo-{i+1}",
-                "content": item.strip(),
-                "assignee": "worker",
-                "status": "pending",
-            })
+        result.append({
+            "id": f"todo-{i+1}",
+            "content": m.group(2) if m else item.strip(),
+            "assignee": m.group(1) if m else "worker",
+            "status": "pending",
+        })
     return result
 
 
@@ -230,13 +222,14 @@ def _build_submit_plan_tool() -> StructuredTool:
 
 
 def _extract_plan_from_tool_calls(produced_msgs: list[BaseMessage]) -> dict | None:
-    """从 planner 的 tool_call 中提取 SubmitPlan 参数。"""
+    """从 planner 的 tool_call 中提取 SubmitPlan 参数。
+
+    AIMessage.tool_calls 中的每个条目始终是 dict（由 agent.run 转换），
+    因此直接使用 dict 访问路径。
+    """
     for msg in produced_msgs:
         if hasattr(msg, "tool_calls") and msg.tool_calls:
             for tc in msg.tool_calls:
-                if hasattr(tc, "name"):
-                    if tc.name == "SubmitPlan":
-                        return tc.arguments
-                elif isinstance(tc, dict) and tc.get("name") == "SubmitPlan":
+                if isinstance(tc, dict) and tc.get("name") == "SubmitPlan":
                     return tc.get("args") or tc.get("arguments", {})
     return None
