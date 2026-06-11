@@ -1,70 +1,39 @@
 # d:\workspace\aiops-agent\src\aiops_agent\cli.py
-"""CLI 交互界面 — LangGraph StateGraph 多 Agent 编排 + 三层记忆。"""
+"""CLI — LangGraph 流式事件消费 + 审批回调。"""
 
 from pathlib import Path
-from typing import Annotated, Any, TypedDict
+from typing import Any
 
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.types import StreamWriter
 
 from . import __version__
+from .agents import ALL_AGENTS
 from .config import Config, _find_project_root
-from .core import Agent, AgentEvent, AgentHandoff
+from .core import Agent
 from .llm import create_llm
 from .memory.tiered import TieredMemory
-from .tools.shell import set_approval_hook
+from .tools import get_tools
 
 
-# ── 审批回调（危险操作需用户确认）──
+# ── 工具注册 ──
 
-# ── 待审批命令队列 ──
-_pending_approval: dict = {}
-
-
-def _approval_hook(command: str, level: str, reason: str) -> bool | None:
-    """Shell 危险操作审批钩子。
-
-    不直接阻塞等待用户输入，而是将命令加入待审批队列，
-    让 LLM 收到"等待确认"的消息。
-
-    Returns:
-        None — 等待外部确认（不会阻塞）
-        True — 已确认
-        False — 已拒绝
-    """
-    label = "🔴 高危" if level == "danger" else "⚠️ 警告"
-    print(f"\n{label} 操作需要确认: {reason}")
-    print(f"  命令: {command}")
-    print(f"  输入 /approve 确认执行，/reject 拒绝")
-    _pending_approval["cmd"] = command
-    _pending_approval["level"] = level
-    _pending_approval["reason"] = reason
-    return None  # 不阻塞，让 LLM 收到"等待确认"消息
-
-
-# ── 构建图 ──
-from .tools import get_tools as get_all_tools
-
-
-# ── 工具注册（自动扫描）──
-
-TOOL_MAP: dict[str, StructuredTool] = get_all_tools()
-
-from .agents import ALL_AGENTS
+TOOL_MAP: dict[str, StructuredTool] = get_tools()
 
 
 # ── 全局状态 ──
 
+from typing import Annotated, TypedDict
+from langchain_core.messages import BaseMessage
+
+
 class AppState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     task: str
-    memory_snapshot: dict[str, Any]
-    agent_handoffs: list[AgentHandoff]
-    reply: str
     need_worker: bool
-    agent_events: list[dict]  # 供 CLI 展示的 AgentEvent 序列化数据
 
 
 # ── 数据目录 ──
@@ -95,108 +64,100 @@ HELP_TEXT = """
   /core              查看核心记忆列表
   /clear             清空对话
   /config            查看当前配置
-  /approve           确认执行待审批的危险操作
-  /reject            拒绝执行待审批的危险操作
 """
 
 
-# ── 节点函数工厂 ──
+# ── 待审批队列 ──
 
-def make_agent_node(name: str, agent: Agent, memory: TieredMemory):
-    """创建 Agent 节点函数，自动处理记忆读写。"""
-    def node_fn(state: AppState) -> dict:
-        # 从 memory 获取上下文
-        memory.add_message({"role": "user", "content": state.get("task", "")})
-        context = memory.get_messages()
-
-        # 构建输入消息
-        input_msgs: list[BaseMessage] = []
-        if context:
-            input_msgs.append(HumanMessage(
-                content="上下文信息:\n" + "\n".join(
-                    f"[{m['role']}]: {m['content'][:200]}" for m in context[-5:]
-                )
-            ))
-        input_msgs.append(HumanMessage(content=state.get("task", "")))
-
-        # 运行 Agent
-        produced_msgs, events = agent.run(input_msgs)
-
-        # 将 Agent 产生的消息同步到 memory
-        for msg in produced_msgs:
-            if hasattr(msg, "type") and hasattr(msg, "content"):
-                role_map = {"human": "user", "ai": "assistant", "tool": "tool"}
-                role = role_map.get(getattr(msg, "type", ""), "assistant")
-                if role == "tool":
-                    memory.add_message({"role": "tool", "content": msg.content, "tool_call_id": getattr(msg, "tool_call_id", "")})
-                else:
-                    memory.add_message({"role": role, "content": msg.content or ""})
-
-        # 压缩检查
-        memory.check_compaction()
-
-        # 提取回复
-        reply = ""
-        for m in reversed(produced_msgs):
-            if hasattr(m, "content") and m.content:
-                reply = m.content
-                break
-
-        return {
-            "messages": produced_msgs,
-            "memory_snapshot": memory.get_stats(),
-            "agent_handoffs": [AgentHandoff(from_agent=name, to_agent="", instruction=state.get("task", ""), result=reply)],
-            "reply": reply,
-            "need_worker": "[NEED_WORKER]" in reply if name == "planner" else state.get("need_worker", True),
-            "agent_events": [{"type": e.type, "content": e.content, "data": e.data} for e in events],
-        }
-    return node_fn
+_pending_approval: dict = {}
 
 
-# ── 事件打印 ──
+# ── 审批回调 ──
 
-def print_event(event: AgentEvent) -> None:
-    if event.type == "text":
-        print(f"\n{event.content}", flush=True)
-    elif event.type == "tool_start":
-        print(f"\n{event.content}", flush=True)
-        print("─── 输出 ──────────────────────────", flush=True)
-    elif event.type == "tool_result":
-        print(event.content[:2000])
-        if len(event.content) > 2000:
-            print("...(输出过长已截断)")
-        print("─── 结束 ──────────────────────────", flush=True)
-    elif event.type == "error":
-        print(f"\n⚠️  {event.content}", flush=True)
+def _approval_hook(command: str, level: str, reason: str):
+    """Shell 危险操作审批（不阻塞，返回 None 表示等待确认）。"""
+    label = "🔴 高危" if level == "danger" else "⚠️ 警告"
+    print(f"\n{label} 操作需要确认: {reason}")
+    print(f"  命令: {command}")
+    print(f"  输入 /approve 确认，/reject 拒绝")
+    _pending_approval["cmd"] = command
+    _pending_approval["level"] = level
+    _pending_approval["reason"] = reason
+    return None
 
 
 # ── 构建图 ──
 
-def build_graph(config: Config, llm, memory: TieredMemory) -> StateGraph:
+def build_graph(config: Config, llm) -> StateGraph:
     builder = StateGraph(AppState)
 
     for adef in ALL_AGENTS:
         name = adef["name"]
         tools = [TOOL_MAP[t] for t in adef["tools"]]
         agent = Agent(name=name, system_prompt=adef["system_prompt"], llm=llm, tools=tools, config=config)
-        builder.add_node(name, make_agent_node(name, agent, memory))
+
+        def make_node(n: str, a: Agent):
+            def node_fn(state: AppState, writer: StreamWriter) -> dict:
+                writer({"type": "agent_start", "agent": n})
+                input_msgs = [HumanMessage(content=state.get("task", ""))]
+                produced_msgs, events = a.run(input_msgs)
+                reply = ""
+                for m in reversed(produced_msgs):
+                    if hasattr(m, "content") and m.content:
+                        reply = m.content
+                        break
+                return {
+                    "messages": produced_msgs,
+                    "need_worker": "[NEED_WORKER]" in reply if n == "planner" else state.get("need_worker", True),
+                }
+            return node_fn
+
+        builder.add_node(name, make_node(name, agent))
 
     names = [a["name"] for a in ALL_AGENTS]
     builder.set_entry_point(names[0])
 
-    # 第一个 Agent（planner）之后是条件边：需要 worker 则继续，否则结束
     if len(names) >= 2:
-        def route_after_planner(state: AppState) -> str:
+        def route(state: AppState) -> str:
             return names[1] if state.get("need_worker", True) else END
-        builder.add_conditional_edges(names[0], route_after_planner, {
-            names[1]: names[1],
-            END: END,
-        })
+        builder.add_conditional_edges(names[0], route, {names[1]: names[1], END: END})
         for i in range(1, len(names) - 1):
             builder.add_edge(names[i], names[i + 1])
         builder.add_edge(names[-1], END)
 
     return builder.compile()
+
+
+# ── 事件渲染 ──
+
+def print_custom_event(event: dict):
+    """渲染 stream_mode='custom' 事件（实时工具调用等）。"""
+    t = event.get("type")
+    if t == "agent_start":
+        print(f"\n{'='*50}", flush=True)
+        print(f"  🤖 [{event['agent']}]", flush=True)
+        print(f"{'='*50}", flush=True)
+    elif t == "tool_start":
+        print(f"\n🔧 正在使用工具: {event['tool']}", flush=True)
+        print("─── 输出 ──────────────────────────", flush=True)
+    elif t == "tool_result":
+        output = event.get("output", "")
+        if output:
+            print(output[:2000], flush=True)
+            if len(output) > 2000:
+                print("...(输出过长已截断)")
+        error = event.get("error", "")
+        if error:
+            print(f"错误: {error}", flush=True)
+        print("─── 结束 ──────────────────────────", flush=True)
+
+
+def print_graph_update(updates: dict):
+    """渲染 stream_mode='updates' 事件（节点返回的文本消息）。"""
+    for data in updates.values():
+        for msg in data.get("messages", []):
+            if hasattr(msg, "content") and msg.content:
+                print(f"\n{msg.content}", flush=True)
 
 
 # ── 主入口 ──
@@ -211,10 +172,6 @@ def main() -> None:
 
     llm = create_llm(config)
 
-    # 注册 Shell 审批回调
-    set_approval_hook(_approval_hook)
-
-    # 创建三层记忆
     memory = TieredMemory(
         llm=llm,
         compaction_enabled=True,
@@ -222,11 +179,16 @@ def main() -> None:
         episodic_persist_path=DATA_DIR / "episodic_memory.json",
     )
 
-    graph = build_graph(config, llm, memory)
+    # 注册 Shell 审批回调
+    from .tools.shell import set_approval_hook
+    set_approval_hook(_approval_hook)
+
+    graph = build_graph(config, llm)
     mode_label = " → ".join(a["name"] for a in ALL_AGENTS)
 
     print(BANNER.format(version=__version__, model=config.model, mode=mode_label))
 
+    # ── 主循环 ──
     while True:
         try:
             user_input = input("\n你: ").strip()
@@ -248,9 +210,7 @@ def main() -> None:
                 print(HELP_TEXT)
                 continue
             elif cmd == "/tools":
-                print("\n  可用工具:")
-                for name, tool in TOOL_MAP.items():
-                    print(f"    • {name}: {tool.description}")
+                print(f"\n  可用工具: {', '.join(TOOL_MAP.keys())}")
                 continue
             elif cmd == "/memory":
                 stats = memory.get_stats()
@@ -258,7 +218,6 @@ def main() -> None:
                 print(f"  ┌─ 工作记忆: {stats['working_messages']}/{stats['working_max_messages']} 条")
                 print(f"  ├─ 情景记忆: {stats['episodic_count']} 个片段")
                 print(f"  ├─ 核心记忆: {stats['core_facts']} 条事实")
-                print(f"  └─ 自动压缩: {'开启' if memory._compaction_enabled else '关闭'}")
                 continue
             elif cmd == "/clear":
                 memory.reset()
@@ -277,73 +236,47 @@ def main() -> None:
                 print(f"\n  Provider: {config.llm_provider}")
                 print(f"  Model: {config.model}")
                 print(f"  Agent 模式: {mode_label}")
-                print(f"  最大工具轮次: {config.max_tool_rounds}")
-                print(f"  记忆策略: {config.memory_strategy}")
                 continue
             elif cmd == "/approve":
                 if _pending_approval:
-                    cmd = _pending_approval.pop("cmd", "")
-                    print(f"✅ 已确认: {cmd}")
-                    # 这里直接执行（简化版，后续可以改进为重新发送）
+                    print(f"✅ 已确认: {_pending_approval.pop('cmd', '')}")
+                    # 简化版：只是确认记录，后续迭代可改进
                 else:
                     print("当前没有待审批的操作")
                 continue
             elif cmd == "/reject":
                 if _pending_approval:
-                    cmd = _pending_approval.pop("cmd", "")
-                    print(f"❌ 已拒绝: {cmd}")
+                    print(f"❌ 已拒绝: {_pending_approval.pop('cmd', '')}")
                 else:
                     print("当前没有待审批的操作")
                 continue
             else:
-                # 尝试 /remember 和 /forget
                 if cmd_parts[0] == "/remember" and len(cmd_parts) >= 2:
-                    fact = " ".join(cmd_parts[1:])
-                    memory.remember(fact)
-                    print(f"✅ 已记住: {fact}")
+                    memory.remember(" ".join(cmd_parts[1:]))
+                    print("✅ 已记住")
                     continue
                 elif cmd_parts[0] == "/forget" and len(cmd_parts) >= 2:
-                    fact = " ".join(cmd_parts[1:])
-                    if memory.forget(fact):
-                        print(f"✅ 已忘记")
+                    if memory.forget(" ".join(cmd_parts[1:])):
+                        print("✅ 已忘记")
                     else:
-                        print(f"⚠️ 未找到")
+                        print("⚠️ 未找到")
                     continue
-                print(f"未知命令: {user_input}，输入 /help 查看可用命令")
+                print(f"未知命令: {user_input}")
                 continue
 
-        # ── 运行图 ──
+        # ── 运行图（双模式流）──
         try:
             state: AppState = {
                 "messages": [HumanMessage(content=user_input)],
                 "task": user_input,
-                "memory_snapshot": {},
-                "agent_handoffs": [],
-                "reply": "",
+                "need_worker": False,
             }
 
-            current_node = ""
-            for chunk in graph.stream(state, stream_mode="updates"):
-                for node_name, updates in chunk.items():
-                    if node_name != current_node:
-                        current_node = node_name
-                        print(f"\n{'='*50}", flush=True)
-                        print(f"  🤖 [{node_name}]", flush=True)
-                        print(f"{'='*50}", flush=True)
-
-                    # 打印 Agent 事件（工具调用等）
-                    for evt in updates.get("agent_events", []):
-                        if evt["type"] == "tool_start":
-                            print(f"\n{evt['content']}", flush=True)
-                            print("─── 输出 ──────────────────────────", flush=True)
-                        elif evt["type"] == "tool_result":
-                            content = evt["content"][:2000]
-                            print(content, flush=True)
-                            if len(evt["content"]) > 2000:
-                                print("...(输出过长已截断)")
-                            print("─── 结束 ──────────────────────────", flush=True)
-                        elif evt["type"] == "text":
-                            print(f"\n{evt['content']}", flush=True)
+            for mode, event in graph.stream(state, stream_mode=["updates", "custom"]):
+                if mode == "custom":
+                    print_custom_event(event)
+                elif mode == "updates":
+                    print_graph_update(event)
 
         except Exception as e:
             import traceback
