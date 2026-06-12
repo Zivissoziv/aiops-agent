@@ -55,16 +55,15 @@ class Episode:
 
 # 压缩提示词：要求 LLM 返回结构化 JSON，强调简洁
 COMPACTION_PROMPT = (
-    "你是一个运维助手，请分析以下对话记录，生成简洁的结构化摘要。\n\n"
+    "分析以下运维对话记录，生成结构化摘要。\n\n"
     "要求:\n"
-    "1. summary: 用 1-2 句话概括核心内容\n"
-    "2. key_facts: 只列出真正关键的事实（最多 3 条），如命令输出、根因等\n"
-    "3. decisions: 做出的决策（最多 2 条）\n"
-    "4. unresolved: 未解决的问题（最多 2 条）\n\n"
-    "以 JSON 格式返回（不要使用 markdown 代码块标记）：\n\n"
-    "JSON 格式示例：\n"
-    '{"summary": "...", "key_facts": ["..."], "decisions": ["..."], "unresolved": ["..."]}\n\n'
-    "请确保 JSON 是有效的，不要包含对话中未提到的信息。"
+    "1. summary: 1-2句话概括核心内容\n"
+    "2. key_facts: 关键事实（最多3条），如命令输出内容、系统状态等\n"
+    "3. decisions: 做出的决策（最多2条）\n"
+    "4. unresolved: 未解决的问题（最多2条）\n\n"
+    "以 JSON 格式返回，不要用 markdown 代码块：\n"
+    '{"summary":"...","key_facts":["..."],"decisions":["..."],"unresolved":["..."]}\n\n'
+    "不要编造对话中未提到的信息。"
 )
 
 

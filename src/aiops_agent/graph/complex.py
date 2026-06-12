@@ -39,11 +39,16 @@ def _build_planner_prompt() -> str:
         "1. 分析用户的任务，将任务拆解为具体的步骤\n"
         "2. 为每个步骤指定合适的执行 Agent\n"
         "3. 如果任务无法由任何 Agent 完成（没有合适的工具），直接回复原因\n"
-        "4. 不要指定具体的命令或参数，只需描述做什么即可\n\n"
+        "4. 不要指定具体的命令或参数，只需描述做什么即可\n"
+        "5. **不要询问用户是否执行**——直接规划，后续会自动执行\n\n"
         f"可用 Agent:\n{agent_descs}\n\n"
         f"Agent 名称: {agent_names}\n\n"
-        "使用 SubmitPlan 工具输出你的规划。如果不需要其他 Agent 执行"
-        "（如纯聊天、纯规划），need_worker 设为 false。不要执行其他工具。"
+        "使用 SubmitPlan 工具输出你的规划，格式如:\n"
+        '  SubmitPlan(plan_summary="一句话描述计划", '
+        'todos=["[worker] 步骤1描述", "[worker] 步骤2描述"], '
+        "need_worker=true)\n"
+        "如果不需要其他 Agent 执行（如纯规划反馈），need_worker 设为 false。\n"
+        "注意：除了 SubmitPlan，不要调用任何其他工具。"
     )
 
 
@@ -146,6 +151,11 @@ def build_complex_graph(config: Config, llm, memory: TieredMemory) -> StateGraph
         name = adef["name"]
         if name == "planner" and adef.get("system_prompt") is None:
             sp = _build_planner_prompt()
+        elif "system_prompt_template" in adef:
+            tool_names = adef.get("tools", [])
+            sp = adef["system_prompt_template"].format(
+                tools_list=", ".join(tool_names)
+            )
         else:
             sp = adef["system_prompt"]
 

@@ -5,22 +5,20 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-INTENT_ROUTER_PROMPT = """You are the intent router for AIOps Agent.
+INTENT_ROUTER_PROMPT = """你是 AIOps Agent 的意图路由。
 
-Classify the user's latest input into exactly one route:
+将用户最新输入分类为以下两种路由之一：
 
-- chat: greetings, thanks, identity/help questions, ordinary conceptual Q&A, or conversational messages that do not need workspace access or tool execution.
-- task: any request that needs creating/editing/reading files, running commands, installing packages, searching the web, checking system status, analyzing logs, or producing a concrete deliverable.
+- chat: 问候、感谢、身份/帮助类问题、普通概念问答、不需要执行工具或访问工作空间的对话
+- task: 需要读写文件、执行命令、安装包、搜索网络、查询系统状态、分析日志、产出具体成果的请求
 
-When session context is provided, use it only to understand whether the latest
-input is a continuation of prior coding/work tasks. A short follow-up like
-"继续", "修一下", "运行测试", "continue", "fix it", or "run tests" should be
-**task** if it refers to prior workspace work.
+如果有对话上下文，仅用于判断当前输入是否为之前工作任务的延续。
+简短跟进（如"继续"、"修一下"、"运行测试"、"continue"）应归类为 task。
 
-Return only JSON with this shape:
-{"route":"chat"|"task","reason":"brief reason","confidence":0.0}
+返回 JSON，格式如下：
+{"route":"chat"|"task","reason":"简要理由","confidence":0.0-1.0}
 
-If uncertain, choose task.
+如果不确定，选择 task。confidence >= 0.55 才信任路由结果。
 """
 
 
