@@ -22,6 +22,9 @@ class AppState(TypedDict):
     need_worker: bool
     todos: list[dict]  # list[TodoItem]
 
+    # ── Worker 执行控制 — complex.py 读写 ──
+    worker_round: int  # Worker 已执行轮次（防无限循环）
+
     # ── 路由字段 — entry workflow 写入，cli.py 读取后决定是否跑 complex ──
     intent_route: str
     intent_reason: str

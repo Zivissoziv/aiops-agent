@@ -1,9 +1,7 @@
 # d:\workspace\aiops-agent\src\aiops_agent\cli.py
 """CLI — LangGraph 流式事件消费 + 审批回调。
 
-双 Graph 架构：
-  1. Entry Graph（意图路由） → intent_router → chat_responder（chat 路由）或 END（task 路由）
-  2. Complex Graph（任务执行） → planner → worker
+架构：planner → worker（无意图路由，planner 自主处理所有输入）
 """
 
 from datetime import datetime
@@ -14,7 +12,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from . import __version__
 from .agents import ALL_AGENTS
 from .config import Config, _find_project_root
-from .graph import AppState, build_complex_graph, build_entry_graph
+from .graph import AppState, build_complex_graph
 from .llm import create_llm
 from .memory.tiered import TieredMemory
 from .tools.file_tools import configure_write_approval
@@ -161,7 +159,6 @@ def main() -> None:
     # 注册 shell workspace 默认工作目录
     configure_shell_workspace(WORKSPACE_DIR)
 
-    entry_graph = build_entry_graph(llm, memory)
     complex_graph = build_complex_graph(config, llm, memory)
     mode_label = " → ".join(a["name"] for a in ALL_AGENTS)
 
@@ -188,6 +185,7 @@ def main() -> None:
         "task": "",
         "need_worker": False,
         "todos": [],
+        "worker_round": 0,
         "intent_route": "",
         "intent_reason": "",
         "intent_confidence": 0.0,
@@ -264,37 +262,10 @@ def main() -> None:
                 print(f"未知命令: {user_input}")
                 continue
 
-        # ── Step 1: Entry Graph — 意图路由 ──
+        # ── Complex Graph — 任务执行 ──
+        # 将用户输入追加到 state["messages"]
         state["task"] = user_input
         state["session_context"] = _build_session_context(state)
-        state["chat_response"] = ""
-        state["intent_route"] = ""
-        state["intent_reason"] = ""
-        state["intent_confidence"] = 0.0
-
-        route = "task"
-        try:
-            for mode, event in entry_graph.stream(state, stream_mode=["updates", "custom"]):
-                if mode == "custom":
-                    print_custom_event(event)
-                    if isinstance(event, dict) and event.get("type") == "intent_decision":
-                        route = str(event.get("route") or "task")
-                elif mode == "updates":
-                    print_graph_update(event)
-        except Exception as e:
-            import traceback
-            print(f"\n❌ 入口路由出错: {e}")
-            traceback.print_exc()
-            route = "task"  # 路由失败时默认走 task
-
-        # ── Step 2: 根据路由结果分流 ──
-        if route == "chat":
-            # 回复已由 print_graph_update 渲染（chat_responder 返回 AIMessage 在 messages 中）
-            # memory 也已在 entry graph 的 chat_responder 节点中同步
-            continue
-
-        # ── Step 3: Complex Graph — 任务执行 ──
-        # 将用户输入追加到 state["messages"]，让 worker 能感知原始请求
         user_msg = HumanMessage(content=user_input)
         state["messages"] = list(state["messages"]) + [user_msg]
 

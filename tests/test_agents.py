@@ -22,10 +22,10 @@ class TestAgentRegistry:
             assert "name" in agent
             assert "tools" in agent
             assert isinstance(agent["tools"], list)
-
-    def test_planner_has_no_tools(self):
-        planner = next(a for a in ALL_AGENTS if a["name"] == "planner")
-        assert planner["tools"] == []
+    def test_planner_has_knowledge_tool(self):
+        """planner 现在有 retrieve_knowledge 工具（用于查知识库后直接回答）。"""
+        planner = [a for a in ALL_AGENTS if a["name"] == "planner"][0]
+        assert "retrieve_knowledge" in planner["tools"]
 
     def test_worker_has_tools(self):
         worker = next(a for a in ALL_AGENTS if a["name"] == "worker")

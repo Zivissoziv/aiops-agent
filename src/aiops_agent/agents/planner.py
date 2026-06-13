@@ -7,5 +7,5 @@
 AGENT_DEF = {
     "name": "planner",
     "system_prompt": None,  # 由 cli.py 动态生成
-    "tools": [],
+    "tools": ["retrieve_knowledge"],
 }
