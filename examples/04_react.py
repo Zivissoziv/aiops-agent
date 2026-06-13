@@ -22,11 +22,13 @@ examples/04_react.py — ReAct 多步骤规划
 """
 
 import json
+import os
 import subprocess
 import re
 from openai import OpenAI
 
 from _common import load_config
+from _ui import console, title, note, info, diagram, success, divider, wait_for_enter, make_table
 
 
 # ============================================================
@@ -55,7 +57,18 @@ REACT_SYSTEM_PROMPT = """你是一个 AIOps 运维助手。请按照 ReAct 模�
 - 基于 Observation 来调整下一步的行动
 - 请用中文输出 Thought 和 Final Answer"""
 
-SAMPLE_TASK = "查一下系统的基本信息，包括磁盘、内存和运行时间，帮我做一个简单的系统健康报告"
+SAMPLE_TASK = "查一下系统的基本信息，包括磁盘、内存，帮我做一个简单的系统健康报告"
+
+# Windows 兼容的命令列表（如果检测到 Windows，使用 dir/wmic 等）
+_IS_WINDOWS = hasattr(os, "name") and os.name == "nt"
+
+if _IS_WINDOWS:
+    SAMPLE_TASK = "检查系统的磁盘和内存状态，做一个简单的健康报告"
+    REACT_SYSTEM_PROMPT = REACT_SYSTEM_PROMPT.replace(
+        "- shell: 执行 Shell 命令，参数: command (字符串)",
+        "- shell: 执行命令，参数: command (字符串)",
+    )
+
 
 # 工具定义（同 02_tool_calling.py）
 TOOLS = [
@@ -116,25 +129,25 @@ def extract_final_answer(text: str) -> str | None:
 # ============================================================
 
 def run_part1():
-    print("\n" + "=" * 60)
-    print("  Part 1: 普通 Tool Calling 的局限")
-    print("=" * 60)
-    print("""
+    title("Part 1: 普通 Tool Calling 的局限")
+
+    console.print("""
   当前 Agent 的工具调用是这样的:
     用户: "查一下系统状态"
-    LLM: → shell("df -h")
+    LLM: → [yellow]shell("df -h")[/yellow]
     工具: → 返回结果
     LLM: → 直接汇总回答
 
-  问题:
+  [bold]问题:[/bold]
   1. LLM 的"推理过程"不可见 — 不知道为什么调这个工具
   2. 无法处理需要多步推理的复杂场景
   3. 如果工具返回异常，LLM 可能不知道下一步该做什么
 
-  示例复杂场景: "查磁盘 → 发现满了 → 查大文件 → 清缓存 → 确认"
+  示例复杂场景: [dim]"查磁盘 → 发现满了 → 查大文件 → 清缓存 → 确认"[/dim]
   这需要多步推理，每一步都依赖上一步的观察结果。
-""")
-    input("\n  按 Enter 进入 Part 2...")
+    """)
+
+    wait_for_enter("按 Enter 进入 Part 2...")
 
 
 # ============================================================
@@ -142,10 +155,9 @@ def run_part1():
 # ============================================================
 
 def run_part2():
-    print("\n" + "=" * 60)
-    print("  Part 2: ReAct 概念 — 思考 + 行动")
-    print("=" * 60)
-    print("""
+    title("Part 2: ReAct 概念 — 思考 + 行动")
+
+    diagram("""
   ReAct = Reasoning (推理) + Acting (行动)
 
   核心循环:
@@ -168,18 +180,17 @@ def run_part2():
   │   "系统健康报告: ..."                     │
   │                                          │
   └──────────────────────────────────────────┘
+    """)
 
-  对比:
-  ┌─────────┬───────────────────┬───────────────────┐
-  │          │ 普通 Tool Calling  │ ReAct              │
-  ├─────────┼───────────────────┼───────────────────┤
-  │ 推理过程 │ 隐式（在 LLM 内部） │ 显式（输出可见）    │
-  │ 可控性   │ 低                │ 高                │
-  │ 多步推理 │ 靠 LLM 内部状态    │ 靠显式的 Thought   │
-  │ 调试    │ 黑盒              │ 白盒              │
-  └─────────┴───────────────────┴───────────────────┘
-""")
-    input("\n  按 Enter 进入 Part 3...")
+    console.print("  [bold]对比:[/bold]")
+    table = make_table(headers=["", "普通 Tool Calling", "ReAct"])
+    table.add_row("推理过程", "隐式（在 LLM 内部）", "[green]显式（输出可见）[/green]")
+    table.add_row("可控性", "低", "[green]高[/green]")
+    table.add_row("多步推理", "靠 LLM 内部状态", "[green]靠显式的 Thought[/green]")
+    table.add_row("调试", "黑盒", "[green]白盒[/green]")
+    console.print(table)
+
+    wait_for_enter("按 Enter 进入 Part 3...")
 
 
 # ============================================================
@@ -187,13 +198,12 @@ def run_part2():
 # ============================================================
 
 def run_part3():
-    print("\n" + "=" * 60)
-    print("  Part 3: 手写 ReAct 循环")
-    print("=" * 60)
-    print(f"\n  任务: {SAMPLE_TASK}")
-    print(f"  {'.' * 50}\n")
+    title("Part 3: 手写 ReAct 循环")
 
-    MAX_STEPS = 8  # 最大循环步数
+    console.print(f"\n  [bold]任务:[/bold] {SAMPLE_TASK}")
+    divider()
+
+    MAX_STEPS = 8
     messages = [
         {"role": "system", "content": REACT_SYSTEM_PROMPT},
         {"role": "user", "content": SAMPLE_TASK},
@@ -202,84 +212,83 @@ def run_part3():
     step = 0
     while step < MAX_STEPS:
         step += 1
-        print(f"\n  ═══ 第 {step} 步 ═══")
+        divider(f"第 {step} 步")
 
-        # 调用 LLM（传入工具定义）
         response = client.chat.completions.create(
             model=model,
             messages=messages,
             tools=TOOLS,
+            extra_body={"thinking": {"type": "disabled"}},
         )
 
         choice = response.choices[0]
         message = choice.message
 
-        # 输出 Thought（文本内容）
         if message.content:
-            # 提取并显示 Thought
             thought = extract_text_thought(message.content)
             if thought:
-                print(f"  💭 Thought: {thought}")
+                console.print(f"  [cyan]> Thought:[/cyan] {thought}")
             else:
-                # 如果没有显式的 Thought 标记，直接显示内容
-                print(f"  💬 {message.content[:200]}")
+                console.print(f"  > {message.content[:200]}")
 
-        # 检查是否有 Final Answer
         if message.content and "Final Answer:" in message.content:
             final = extract_final_answer(message.content)
             if final:
-                print(f"\n  ✅ Final Answer:\n{final}")
+                success(f"Final Answer:\n{final}")
                 break
 
-        # 执行工具调用
         if message.tool_calls:
+            # Collect all tool call results first
+            tool_results = []
             for tc in message.tool_calls:
                 func_name = tc.function.name
                 func_args = json.loads(tc.function.arguments)
                 command = func_args.get("command", "")
 
-                print(f"  🔧 Action: {func_name}(\"{command}\")")
+                console.print(f"  [yellow]> Action:[/yellow] {func_name}(\"{command}\")")
 
-                # 执行工具
                 result = execute_shell(command)
-                print(f"  👁 Observation: {result[:120]}...")
+                console.print(f"  [dim]> Observation:[/dim] {result[:120]}...")
 
-                # 将 assistant 消息（含 tool_calls）加入历史
-                messages.append({
-                    "role": "assistant",
-                    "content": message.content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": func_name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                    ],
-                })
+                tool_results.append((tc, result))
 
-                # 将工具结果作为 observation 加入历史
+            # One assistant message with all tool_calls
+            messages.append({
+                "role": "assistant",
+                "content": message.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc, _ in tool_results
+                ],
+            })
+
+            # One tool result message per call
+            for tc, result in tool_results:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "content": result,
                 })
         else:
-            # 没有工具调用也没有 Final Answer
             if message.content and "Final Answer:" not in message.content:
-                print(f"  (没有工具调用，等待下一步...)")
+                info("(没有工具调用，等待下一步...)")
                 messages.append({"role": "assistant", "content": message.content})
             elif not message.tool_calls and not message.content:
-                print("  没有更多输出，结束")
+                info("没有更多输出，结束")
                 break
     else:
-        print(f"\n  ⚠️ 已达到最大步数 {MAX_STEPS}，循环结束")
+        note(f"已达到最大步数 {MAX_STEPS}，循环结束")
 
-    print(f"\n  共执行 {step} 步，消息历史共 {len(messages)} 条")
+    info(f"共执行 {step} 步，消息历史共 {len(messages)} 条")
 
-    input("\n  按 Enter 进入 Part 4...")
+    wait_for_enter("按 Enter 进入 Part 4...")
 
 
 # ============================================================
@@ -287,31 +296,31 @@ def run_part3():
 # ============================================================
 
 def run_part4():
-    print("\n" + "=" * 60)
-    print("  Part 4: 总结")
-    print("=" * 60)
-    print("""
+    title("Part 4: 总结")
+
+    console.print("""
   ReAct 的核心价值:
 
-  1. 透明
+  1. [bold]透明[/bold]
      - 每一步的推理过程都可见
      - 用户可以理解 Agent 为什么做某个操作
 
-  2. 可控
+  2. [bold]可控[/bold]
      - 可以在 Thought 阶段介入纠正
      - 容易调试和修改
 
-  3. 多步推理
+  3. [bold]多步推理[/bold]
      - 每一步都基于 Observation 重新思考
      - 不会"遗忘"之前的步骤
 
   ReAct 在实战 Agent 中的应用:
     实战的 Agent 已内置 Tool Calling 循环，
-    通过启用 ReAct 模式（REACT_ENABLED=true），
+    通过启用 ReAct 模式（[yellow]REACT_ENABLED=true[/yellow]），
     可以让 Agent 输出显式的推理过程。
-    见 src/aiops_agent/core/agent.py
-""")
-    print("再见！\n")
+    见 [cyan]src/aiops_agent/core/agent.py[/cyan]
+    """)
+
+    console.print("[bold cyan]再见！[/bold cyan]")
 
 
 # ============================================================
@@ -319,9 +328,9 @@ def run_part4():
 # ============================================================
 
 if __name__ == "__main__":
-    print(f"\n{'='*60}")
-    print(f"  ReAct 多步骤规划示例 (Model: {model})")
-    print(f"{'='*60}")
+    console.rule("[bold cyan]ReAct 多步骤规划示例[/bold cyan]")
+    console.print(f"  Model: {model}")
+    console.rule()
 
     run_part1()
     run_part2()

@@ -24,6 +24,7 @@ import os
 from openai import OpenAI
 
 from _common import load_config, estimate_tokens
+from _ui import console, note
 
 
 # ============================================================
@@ -73,10 +74,9 @@ SYSTEM_PROMPT = os.getenv(
 
 messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-print(f"\n{'='*50}")
-print(f"  LangChain 对话机器人 (Model: {model})")
-print(f"  输入 exit 或 quit 退出")
-print(f"{'='*50}\n")
+console.rule("[bold cyan]基本对话示例[/bold cyan]")
+console.print(f"  Model: {model}")
+console.print(f"  输入 [bold yellow]exit[/bold yellow] 或 [bold yellow]quit[/bold yellow] 退出\n")
 
 # 主循环: 一问一答
 while True:
@@ -84,7 +84,7 @@ while True:
     if not user_input:
         continue
     if user_input.lower() in ("exit", "quit"):
-        print("再见！\n")
+        console.print("[bold cyan]再见！[/bold cyan]")
         break
 
     # 将用户输入添加到消息列表
@@ -98,6 +98,7 @@ while True:
         model=model,
         messages=messages,
         stream=True,
+        extra_body={"thinking": {"type": "disabled"}},
     )
     for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.content:
@@ -111,4 +112,4 @@ while True:
     messages.append({"role": "assistant", "content": full_response})
 
     # 简单的 token 消耗提示（近似估算）
-    print(f"  [当前历史约 {estimate_tokens(messages)} tokens，共 {len(messages)} 条消息]")
+    note(f"当前历史约 {estimate_tokens(messages)} tokens，共 {len(messages)} 条消息")

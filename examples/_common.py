@@ -34,14 +34,22 @@ def load_config() -> dict:
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     if not api_key or len(api_key) < 10:
-        print("❌ 请在项目根目录的 .env 文件中配置 OPENAI_API_KEY")
+        print("[x] 请在项目根目录的 .env 文件中配置 OPENAI_API_KEY")
         print("   参考 .env.example 文件")
         exit(1)
+
+    # Embedding 配置（可选，用于 RAG 示例）
+    embedding_api_key = os.getenv("EMBEDDING_API_KEY", api_key)
+    embedding_base_url = os.getenv("EMBEDDING_BASE_URL", base_url)
+    embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
     return {
         "api_key": api_key,
         "base_url": base_url,
         "model": model,
+        "embedding_api_key": embedding_api_key,
+        "embedding_base_url": embedding_base_url,
+        "embedding_model": embedding_model,
     }
 
 
@@ -81,3 +89,31 @@ def estimate_tokens(messages: list[dict]) -> int:
                 if isinstance(block, dict) and "text" in block:
                     total += len(block["text"])
     return total // 4
+
+
+def create_embeddings(
+    client: OpenAI,
+    texts: list[str],
+    model: str = "text-embedding-3-small",
+    batch_size: int = 10,
+) -> list[list[float]]:
+    """批量将文本转为向量（Embedding）。
+
+    用于 RAG 场景：将知识库文档转为向量后存入向量数据库，
+    检索时再将问题转为向量，通过相似度匹配找到相关文档。
+
+    Args:
+        client: OpenAI 客户端
+        texts: 文本列表（每段文本会被转为一个向量）
+        model: Embedding 模型名，默认 text-embedding-3-small
+        batch_size: 每批处理数量（部分 API 有上限，如 DashScope 限 10）
+
+    Returns:
+        向量列表，每个向量是一个 float 列表（维度取决于模型）
+    """
+    all_embeddings: list[list[float]] = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        response = client.embeddings.create(model=model, input=batch)
+        all_embeddings.extend(item.embedding for item in response.data)
+    return all_embeddings

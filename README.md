@@ -128,7 +128,7 @@ python -m aiops_agent
 | 03_memory | 三层记忆系统 | 工作记忆、情景记忆、核心记忆、压缩机制 | ✅ |
 | 04_react | ReAct 多步骤规划 | Thought、Action、Observation 循环 | ✅ |
 | 05_langgraph | LangGraph 状态机 | StateGraph、Node、Conditional Edge | ✅ |
-| 06_rag | 知识库问答 | Embedding、向量检索、RAG | 📝 规划中 |
+| 06_rag | 知识库问答 | Embedding、向量检索、RAG | ✅ |
 
 ## 技术栈
 

@@ -24,5 +24,8 @@ build/
 # Data
 .aiops_data/
 
+# Chroma vector database (regenerated on each run)
+examples/chroma_db/
+
 # uv
 uv.lock
