@@ -19,5 +19,5 @@ AGENT_DEF = {
         "- 回复尽量简洁，把工具执行的原始输出呈现给用户即可\n"
         "- **不要主动写文件**，除非用户明确要求保存到文件"
     ),
-    "tools": ["shell", "read_file", "write_file"],
+    "tools": ["shell", "read_file", "write_file", "retrieve_knowledge"],
 }
