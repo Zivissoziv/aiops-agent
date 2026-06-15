@@ -12,7 +12,10 @@
 │   ├── 02_tool_calling.py    # 工具调用机制
 │   ├── 03_memory.py          # 三层记忆系统
 │   ├── 04_react.py           # ReAct 多步骤规划
-│   └── 05_langgraph.py       # LangGraph 状态机
+│   ├── 05_langgraph.py       # LangGraph 状态机
+│   ├── 06_rag.py             # RAG 知识库问答
+│   ├── 07_skills.py          # 技能系统（Skill System）
+│   └── skills/               # 📦 技能目录 — SKILL.md + 工具脚本
 ├── src/               # 🚀 实战项目 — 可部署的 AIOps Agent
 │   ├── aiops_agent/
 │   │   ├── cli.py            # CLI 交互界面
@@ -59,6 +62,12 @@ python examples/04_react.py
 
 # 示例 05: LangGraph 状态机
 python examples/05_langgraph.py
+
+# 示例 06: RAG 知识库问答
+python examples/06_rag.py
+
+# 示例 07: 技能系统
+python examples/07_skills.py
 ```
 
 ### 3. 运行实战项目
@@ -129,6 +138,7 @@ python -m aiops_agent
 | 04_react | ReAct 多步骤规划 | Thought、Action、Observation 循环 | ✅ |
 | 05_langgraph | LangGraph 状态机 | StateGraph、Node、Conditional Edge | ✅ |
 | 06_rag | 知识库问答 | Embedding、向量检索、RAG | ✅ |
+| 07_skills | 技能系统 | SKILL.md、技能加载器、match_keywords 自动匹配 | ✅ |
 
 ## 技术栈
 
