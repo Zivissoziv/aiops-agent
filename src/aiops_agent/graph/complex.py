@@ -43,8 +43,7 @@ def _build_planner_prompt() -> str:
         "你是一个 AIOps 智能助手。根据用户的输入，决定是直接回复还是规划任务。\n\n"
         "三种场景：\n\n"
         "1. 闲聊/问候（如 你好、谢谢、你是谁）\n"
-        "   直接回复即可，不要调用任何工具。\n"
-        "   使用 SubmitPlan(need_worker=false) 结束。\n\n"
+        "   直接回复，使用 SubmitPlan(need_worker=false, plan_summary=\"闲聊回复\", todos=[]) 结束。\n\n"
         "2. 询问公司内部规范/配置（如端口分配、命名规则、告警流程）\n"
         "   调用 retrieve_knowledge 工具查询知识库，然后基于查询结果回复。\n"
         "   使用 SubmitPlan(need_worker=false) 结束。\n\n"
@@ -213,6 +212,8 @@ def _make_node(name: str, agent: Agent, memory: TieredMemory):
             # 跟踪 Worker 执行轮次（防止无限循环）
             current_rounds = state.get("worker_round", 0)
             result["worker_round"] = current_rounds + 1
+
+        writer({"type": "agent_end", "agent": name})
 
         result["messages"] = produced_msgs
         return result
