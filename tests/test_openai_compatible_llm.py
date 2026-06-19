@@ -17,22 +17,8 @@ def llm():
     )
 
 
-class TestBuildKwargs:
-    """_build_kwargs 测试。"""
-
-    def test_without_tools(self, llm):
-        kwargs = llm._build_kwargs(None)
-        assert kwargs == {"model": "gpt-4o-mini"}
-
-    def test_with_tools(self, llm):
-        tools = [{"type": "function", "function": {"name": "test"}}]
-        kwargs = llm._build_kwargs(tools)
-        assert "tools" in kwargs
-        assert kwargs["tools"] == tools
-
-
 class TestParseResponse:
-    """_parse_response 测试。"""
+    """_parse 测试。"""
 
     def test_text_response(self, llm):
         # 模拟 OpenAI SDK 响应
@@ -44,7 +30,7 @@ class TestParseResponse:
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
 
-        result = llm._parse_response(mock_response)
+        result = llm._parse(mock_response)
         assert result.content == "Hello!"
         assert result.tool_calls == []
         assert result.finish_reason == "stop"
@@ -63,7 +49,7 @@ class TestParseResponse:
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
 
-        result = llm._parse_response(mock_response)
+        result = llm._parse(mock_response)
         assert result.content is None
         assert len(result.tool_calls) == 1
         assert result.tool_calls[0].name == "shell"
@@ -83,5 +69,5 @@ class TestParseResponse:
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
 
-        result = llm._parse_response(mock_response)
+        result = llm._parse(mock_response)
         assert result.tool_calls[0].arguments == {"raw": "not-json"}

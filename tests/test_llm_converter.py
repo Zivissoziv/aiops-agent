@@ -1,10 +1,8 @@
 """LLM 消息转换器单元测试。"""
 
-import json
-
 import pytest
 
-from aiops_agent.llm.openai_compatible import _lc_msg_to_dict
+from aiops_agent.llm.openai_compatible import _lc_to_dict
 
 
 class MockMessage:
@@ -17,57 +15,38 @@ class MockMessage:
 
 
 class TestLcMsgToDict:
-    """_lc_msg_to_dict 转换测试。"""
+    """_lc_to_dict 转换测试（合并同类项，保留核心场景）。"""
 
-    def test_human_message(self):
-        msg = MockMessage("human", "hello")
-        result = _lc_msg_to_dict(msg)
-        assert result == {"role": "user", "content": "hello"}
-
-    def test_ai_message(self):
-        msg = MockMessage("ai", "I'm AI")
-        result = _lc_msg_to_dict(msg)
-        assert result == {"role": "assistant", "content": "I'm AI"}
-
-    def test_system_message(self):
-        msg = MockMessage("system", "be helpful")
-        result = _lc_msg_to_dict(msg)
-        assert result == {"role": "system", "content": "be helpful"}
-
-    def test_tool_message(self):
-        msg = MockMessage("tool", '{"ok": true}', tool_call_id="call_123")
-        result = _lc_msg_to_dict(msg)
-        assert result["role"] == "tool"
-        assert result["tool_call_id"] == "call_123"
+    def test_role_mapping(self):
+        """角色映射: human→user, ai→assistant, system→system, tool→tool, 未知→user。"""
+        cases = [
+            (MockMessage("human", "hi"), {"role": "user", "content": "hi"}),
+            (MockMessage("ai", "ok"), {"role": "assistant", "content": "ok"}),
+            (MockMessage("system", "sys"), {"role": "system", "content": "sys"}),
+            (MockMessage("tool", "res", tool_call_id="c1"),
+             {"role": "tool", "content": "res", "tool_call_id": "c1"}),
+            (MockMessage("function", "x"), {"role": "user", "content": "x"}),
+        ]
+        for msg, expected in cases:
+            assert _lc_to_dict(msg) == expected
 
     def test_ai_with_tool_calls(self):
+        """AI 消息包含 tool_calls 时正确转换。"""
         tc = [{"id": "tc1", "name": "shell", "args": {"command": "ls"}}]
-        msg = MockMessage("ai", "", tool_calls=tc)
-        result = _lc_msg_to_dict(msg)
+        result = _lc_to_dict(MockMessage("ai", "", tool_calls=tc))
         assert result["role"] == "assistant"
-        assert "tool_calls" in result
         assert result["tool_calls"][0]["function"]["name"] == "shell"
+        assert result["tool_calls"][0]["function"]["arguments"] == '{"command": "ls"}'
 
-    def test_empty_content(self):
-        msg = MockMessage("human", None)
-        result = _lc_msg_to_dict(msg)
-        assert result["content"] == ""
+    def test_content_handling(self):
+        """各类 content 格式：None→空字串、列表→拼接文本。"""
+        assert _lc_to_dict(MockMessage("human", None))["content"] == ""
+        assert _lc_to_dict(MockMessage("human", [{"type": "text", "text": "多模态"}]))["content"] == "多模态"
 
-    def test_list_content(self):
-        msg = MockMessage("human", [{"type": "text", "text": "多模态内容"}])
-        result = _lc_msg_to_dict(msg)
-        assert isinstance(result["content"], str)
-        assert "多模态内容" in result["content"]
-
-    def test_list_content_mixed(self):
-        msg = MockMessage("human", [
+    def test_list_content_ignores_non_text(self):
+        """content 列表中只取 text 类型的字段。"""
+        result = _lc_to_dict(MockMessage("human", [
             {"type": "text", "text": "描述"},
-            {"type": "image_url", "image_url": {"url": "data:image/..."}},
-        ])
-        result = _lc_msg_to_dict(msg)
-        assert result["content"] == "描述"  # 只提取 text 类型
-
-    def test_unknown_type(self):
-        msg = MockMessage("function", "result")
-        result = _lc_msg_to_dict(msg)
-        assert result["role"] == "user"  # 未知类型兜底为 user
+            {"type": "image_url", "image_url": {"url": "data:img"}},
+        ]))
+        assert result["content"] == "描述"

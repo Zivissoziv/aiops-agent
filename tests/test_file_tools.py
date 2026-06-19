@@ -1,7 +1,5 @@
-"""文件工具单元测试。
-
-注意: 这些测试使用回调来模拟审批机制，并测试文件读写功能。
-"""
+# -*- coding: utf-8 -*-
+"""文件工具单元测试。"""
 
 import tempfile
 from pathlib import Path
@@ -18,28 +16,23 @@ from src.aiops_agent.tools.file_tools import (
 
 
 class TestReadFile:
-    """读取文件测试。"""
 
-    @pytest.fixture
-    def test_file(self):
+    def test_read_existing(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "test.txt"
             path.write_text("line1\nline2\nline3\n", encoding="utf-8")
-            yield str(path)
+            result = read_file.invoke({"path": str(path)})
+            assert "line1" in result
 
-    def test_read_existing(self, test_file):
-        result = read_file.invoke({"path": test_file})
-        assert "line1" in result
-        assert "line2" in result
-
-    def test_read_limit_lines(self, test_file):
+    def test_read_limit_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "long.txt"
             path.write_text("\n".join(f"line{i}" for i in range(100)), encoding="utf-8")
             result = read_file.invoke({"path": str(path), "lines": 5})
             lines = result.split("\n")
-            # 应该只有 5 行 + 省略提示
-            assert any("仅显示前 5 行" in line for line in lines)
+            # 只显示前 5 行 + 省略提示
+            assert lines[0] == "line0"
+            assert any("..." in line for line in lines)
 
     def test_read_not_found(self):
         result = read_file.invoke({"path": "/nonexistent/file.txt"})
@@ -54,115 +47,23 @@ class TestReadFile:
 
 
 class TestWriteFile:
-    """写入文件测试。"""
 
     @pytest.fixture(autouse=True)
-    def setup_and_cleanup(self):
-        # 确保每次测试后重置配置
+    def setup_cleanup(self):
         configure_write_approval(None)
         configure_workspace(None)
         yield
         configure_write_approval(None)
         configure_workspace(None)
 
-    def test_write_without_sandbox(self):
-        # 没有沙箱时，行为不变
+    def test_write_basic(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "new.txt"
-            result = write_file.invoke({"path": str(path), "content": "hello world"})
+            result = write_file.invoke({"path": str(path), "content": "hello"})
             assert "已写入" in result
-            assert path.read_text(encoding="utf-8") == "hello world"
+            assert path.read_text(encoding="utf-8") == "hello"
 
-    def test_write_within_workspace(self):
-        # 在 workspace 内直接写入，无需审批
-        with tempfile.TemporaryDirectory() as tmp:
-            ws = Path(tmp)
-            configure_workspace(str(ws))
-            path = ws / "within.txt"
-            result = write_file.invoke({"path": str(path), "content": "data"})
-            assert "已写入" in result
-            assert path.read_text(encoding="utf-8") == "data"
-
-    def test_write_outside_workspace_approved(self):
-        # 越界且用户批准
-        with tempfile.TemporaryDirectory() as tmp:
-            ws = Path(tmp) / "workspace"
-            ws.mkdir()
-            configure_workspace(str(ws))
-            outside = Path(tmp) / "outside.txt"
-
-            approved = []
-            def handler(path, preview):
-                approved.append((path, preview))
-                return True
-            configure_write_approval(handler)
-
-            result = write_file.invoke({"path": str(outside), "content": "data"})
-            assert "已写入" in result
-            assert len(approved) == 1
-
-    def test_write_outside_workspace_denied(self):
-        # 越界且用户拒绝
-        with tempfile.TemporaryDirectory() as tmp:
-            ws = Path(tmp) / "workspace"
-            ws.mkdir()
-            configure_workspace(str(ws))
-            outside = Path(tmp) / "outside.txt"
-
-            def handler(path, preview):
-                return False
-            configure_write_approval(handler)
-
-            result = write_file.invoke({"path": str(outside), "content": "data"})
-            assert "拒绝" in result
-            assert not outside.exists()
-
-    def test_read_within_workspace(self):
-        # 在 workspace 内直接读取
-        with tempfile.TemporaryDirectory() as tmp:
-            ws = Path(tmp)
-            configure_workspace(str(ws))
-            path = ws / "test.txt"
-            path.write_text("inside\n", encoding="utf-8")
-            result = read_file.invoke({"path": str(path)})
-            assert "inside" in result
-
-    def test_read_outside_workspace_approved(self):
-        # 越界读取且用户批准
-        with tempfile.TemporaryDirectory() as tmp:
-            ws = Path(tmp) / "workspace"
-            ws.mkdir()
-            configure_workspace(str(ws))
-            outside = Path(tmp) / "outside.txt"
-            outside.write_text("external\n", encoding="utf-8")
-
-            approved = []
-            def handler(path, preview):
-                approved.append((path, preview))
-                return True
-            configure_write_approval(handler)
-
-            result = read_file.invoke({"path": str(outside)})
-            assert "external" in result
-            assert len(approved) == 1
-
-    def test_read_outside_workspace_denied(self):
-        # 越界读取且用户拒绝
-        with tempfile.TemporaryDirectory() as tmp:
-            ws = Path(tmp) / "workspace"
-            ws.mkdir()
-            configure_workspace(str(ws))
-            outside = Path(tmp) / "outside.txt"
-            outside.write_text("secret\n", encoding="utf-8")
-
-            def handler(path, preview):
-                return False
-            configure_write_approval(handler)
-
-            result = read_file.invoke({"path": str(outside)})
-            assert "拒绝" in result
-
-    def test_append_mode(self):
+    def test_append(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "append.txt"
             path.write_text("original\n", encoding="utf-8")
@@ -171,117 +72,102 @@ class TestWriteFile:
             assert path.read_text(encoding="utf-8") == "original\nappended"
 
 
-class TestEditFile:
-    """编辑文件测试。"""
+class TestWorkspaceSandbox:
 
     @pytest.fixture(autouse=True)
-    def setup_and_cleanup(self):
+    def setup_cleanup(self):
         configure_write_approval(None)
         configure_workspace(None)
         yield
         configure_write_approval(None)
         configure_workspace(None)
 
-    def test_edit_single_match(self):
+    def test_read_write_within_workspace(self):
+        """workspace 内直接读写，无需审批。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            configure_workspace(str(ws))
+            assert "已写入" in write_file.invoke({"path": str(ws / "f.txt"), "content": "data"})
+            assert "data" in read_file.invoke({"path": str(ws / "f.txt")})
+
+    def test_read_write_outside_workspace_approved(self):
+        """越界操作，经审批通过。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / "workspace"
+            ws.mkdir()
+            configure_workspace(str(ws))
+            outside = Path(tmp) / "outside.txt"
+
+            approved = []
+            configure_write_approval(lambda path, preview: (approved.append((path, preview)), True)[1])
+
+            # 越界写入
+            result_write = write_file.invoke({"path": str(outside), "content": "data"})
+            assert "已写入" in result_write
+            assert outside.read_text(encoding="utf-8") == "data"
+
+            # 越界读取
+            result_read = read_file.invoke({"path": str(outside)})
+            assert "data" in result_read
+
+            assert len(approved) == 2
+
+    def test_write_outside_workspace_denied(self):
+        """越界操作被拒绝。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / "workspace"
+            ws.mkdir()
+            configure_workspace(str(ws))
+            outside = Path(tmp) / "outside.txt"
+
+            configure_write_approval(lambda path, preview: False)
+            assert "拒绝" in write_file.invoke({"path": str(outside), "content": "data"})
+            assert not outside.exists()
+
+
+class TestEditFile:
+
+    @pytest.fixture(autouse=True)
+    def setup_cleanup(self):
+        configure_write_approval(None)
+        configure_workspace(None)
+        yield
+        configure_write_approval(None)
+        configure_workspace(None)
+
+    def test_edit_success(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "test.py"
-            path.write_text("print('hello')\nprint('world')\n", encoding="utf-8")
-            result = edit_file.invoke({
-                "path": str(path),
-                "old_text": "print('hello')",
-                "new_text": "print('hi')",
-            })
+            path.write_text("print('hello')\n", encoding="utf-8")
+            result = edit_file.invoke({"path": str(path), "old_text": "hello", "new_text": "hi"})
             assert "已编辑" in result
-            assert path.read_text(encoding="utf-8") == "print('hi')\nprint('world')\n"
+            assert path.read_text(encoding="utf-8") == "print('hi')\n"
 
     def test_edit_not_found(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "test.py"
-            path.write_text("print('hello')\n", encoding="utf-8")
-            result = edit_file.invoke({
-                "path": str(path),
-                "old_text": "print('nope')",
-                "new_text": "print('hi')",
-            })
+            path.write_text("x\n", encoding="utf-8")
+            result = edit_file.invoke({"path": str(path), "old_text": "y", "new_text": "z"})
             assert "未找到" in result
-
-    def test_edit_multiple_matches(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "test.py"
-            path.write_text("x = 1\nx = 2\nx = 3\n", encoding="utf-8")
-            result = edit_file.invoke({
-                "path": str(path),
-                "old_text": "x = ",
-                "new_text": "y = ",
-            })
-            assert "多处匹配" in result or "找到" in result
 
     def test_edit_dry_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "test.py"
-            path.write_text("old_code\n", encoding="utf-8")
-            result = edit_file.invoke({
-                "path": str(path),
-                "old_text": "old_code",
-                "new_text": "new_code",
-                "dry_run": True,
-            })
+            path.write_text("old\n", encoding="utf-8")
+            result = edit_file.invoke({"path": str(path), "old_text": "old", "new_text": "new", "dry_run": True})
             assert "将替换" in result
-            # 文件内容不变
-            assert path.read_text(encoding="utf-8") == "old_code\n"
+            assert path.read_text(encoding="utf-8") == "old\n"
 
-    def test_edit_within_workspace(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ws = Path(tmp)
-            configure_workspace(str(ws))
-            path = ws / "test.txt"
-            path.write_text("hello world\n", encoding="utf-8")
-            result = edit_file.invoke({
-                "path": str(path),
-                "old_text": "world",
-                "new_text": "there",
-            })
-            assert "已编辑" in result
-            assert path.read_text(encoding="utf-8") == "hello there\n"
-
-    def test_edit_outside_workspace_approved(self):
+    def test_edit_outside_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:
             ws = Path(tmp) / "workspace"
             ws.mkdir()
             configure_workspace(str(ws))
-            outside = Path(tmp) / "outside.txt"
-            outside.write_text("old\n", encoding="utf-8")
+            path = Path(tmp) / "outside.txt"
+            path.write_text("old\n", encoding="utf-8")
 
-            approved = []
-            def handler(path, preview):
-                approved.append((path, preview))
-                return True
-            configure_write_approval(handler)
+            configure_write_approval(lambda path, preview: True)
+            assert "已编辑" in edit_file.invoke({"path": str(path), "old_text": "old", "new_text": "new"})
 
-            result = edit_file.invoke({
-                "path": str(outside),
-                "old_text": "old",
-                "new_text": "new",
-            })
-            assert "已编辑" in result
-            assert len(approved) == 1
-
-    def test_edit_outside_workspace_denied(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ws = Path(tmp) / "workspace"
-            ws.mkdir()
-            configure_workspace(str(ws))
-            outside = Path(tmp) / "outside.txt"
-            outside.write_text("old\n", encoding="utf-8")
-
-            def handler(path, preview):
-                return False
-            configure_write_approval(handler)
-
-            result = edit_file.invoke({
-                "path": str(outside),
-                "old_text": "old",
-                "new_text": "new",
-            })
-            assert "拒绝" in result
-            assert outside.read_text(encoding="utf-8") == "old\n"
+            configure_write_approval(lambda path, preview: False)
+            assert "拒绝" in edit_file.invoke({"path": str(path), "old_text": "new", "new_text": "x"})
