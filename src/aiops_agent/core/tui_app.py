@@ -1,8 +1,7 @@
 # d:\workspace\aiops-agent\src\aiops_agent\core\tui_app.py
-"""Textual TUI — 三段式分屏交互。"""
+"""Textual TUI — 三段式分屏。"""
 
-import asyncio
-import traceback
+import asyncio, traceback
 from datetime import datetime
 
 from langchain_core.messages import HumanMessage
@@ -20,97 +19,49 @@ from ..graph.complex import TOOL_MAP
 from ..llm import create_llm
 from ..memory.tiered import TieredMemory
 from ..tools.file_tools import configure_write_approval
-from ..tools.file_tools import configure_workspace as configure_file_workspace
-from ..tools.shell import configure_approval as configure_shell_approval
-from ..tools.shell import configure_workspace as configure_shell_workspace
-
-
-HELP_LINES = [
-    "可用命令:",
-    "  [b]/help[/b]             显示此帮助",
-    "  [b]/exit[/b]             退出程序",
-    "  [b]/tools[/b]            查看可用工具",
-    "  [b]/memory[/b]           查看三层记忆状态",
-    "  [b]/workspace[/b]        查看当前 Workspace",
-    "  [b]/remember <事实>[/b]  添加核心记忆",
-    "  [b]/forget <事实>[/b]    删除核心记忆",
-    "  [b]/core[/b]             查看核心记忆列表",
-    "  [b]/clear[/b]            清空对话",
-    "  [b]/config[/b]           查看当前配置",
-]
+from ..tools.file_tools import configure_workspace as cfg_fw
+from ..tools.shell import configure_approval as cfg_sh_a
+from ..tools.shell import configure_workspace as cfg_sh_w
 
 
 class ConfirmScreen(ModalScreen[bool]):
-    def __init__(self, command: str, reason: str, **kwargs):
-        super().__init__(**kwargs)
-        self._command = command
-        self._reason = reason
-
+    def __init__(self, cmd: str, reason: str, **kw):
+        super().__init__(**kw)
+        self._cmd, self._reason = cmd, reason
     def compose(self) -> ComposeResult:
-        yield Label(
-            "\n⚠️ [bold yellow]高风险操作需要确认[/]\n\n"
-            f"{self._reason}\n\n"
-            f"[dim]{self._command}[/]\n"
-        )
+        yield Label(f"\n⚠️ [bold yellow]高风险操作需要确认[/]\n\n{self._reason}\n\n[dim]{self._cmd}[/]\n")
         with Horizontal():
             yield Button("执行", variant="error", id="yes")
             yield Button("取消", variant="primary", id="no")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "yes")
+    def on_button_pressed(self, e: Button.Pressed) -> None:
+        self.dismiss(e.button.id == "yes")
 
 
 class AiOpsTUI(App):
-    """AIOps Agent TUI 主应用。"""
-
     CSS = """
     Screen { layout: vertical; }
-
     #main-area { height: 1fr; }
-
-    #chat-panel {
-        width: 5fr;
-        border-right: thick $primary;
-        height: 1fr;
-    }
+    #chat-panel { width: 5fr; border-right: thick $primary; height: 1fr; }
     #chat-log { height: 1fr; }
-
-    #flow-panel {
-        width: 2fr;
-        border-right: thick $surface;
-        height: 1fr;
-    }
+    #flow-panel { width: 2fr; border-right: thick $surface; height: 1fr; }
     #node-box, #tool-box { height: 1fr; }
     #node-box { border-bottom: solid $surface; }
     #node-text, #tool-text { max-height: 100%; }
-
-    #info-panel {
-        width: 3fr;
-        height: 1fr;
-    }
+    #info-panel { width: 3fr; height: 1fr; }
     #workspace-box, #knowledge-box, #memory-box { height: 1fr; }
     #workspace-box { border-bottom: solid $surface; }
-
-    #input-bar {
-        dock: bottom;
-        height: 3;
-    }
+    #input-bar { dock: bottom; height: 3; }
     #input-bar > Input { width: 1fr; }
-
     Header { background: $primary 10%; }
     """
 
-    BINDINGS = [
-        Binding("ctrl+c", "quit", "退出", priority=True),
-    ]
+    BINDINGS = [Binding("ctrl+c", "quit", "退出", priority=True)]
 
-    def __init__(self, config: Config, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, config: Config, **kw):
+        super().__init__(**kw)
         self._config = config
         self._llm = create_llm(config)
-        self._memory: TieredMemory | None = None
-        self._graph = None
-        self._state: AppState | None = None
+        self._memory = self._graph = self._state = None
         self._workspace_id = ""
         self._node_lines: list[str] = []
         self._tool_lines: list[str] = []
@@ -121,278 +72,150 @@ class AiOpsTUI(App):
             with Vertical(id="chat-panel"):
                 yield RichLog(id="chat-log", markup=True, highlight=True, wrap=True, max_lines=10_000)
             with Vertical(id="flow-panel"):
-                with Vertical(id="node-box"):
-                    yield Static("🤖 [bold]节点流转[/]")
-                    yield RichLog(id="node-text", markup=True, highlight=True, max_lines=50)
-                with Vertical(id="tool-box"):
-                    yield Static("🔧 [bold]工具调用[/]")
-                    yield RichLog(id="tool-text", markup=True, highlight=True, max_lines=50)
+                for id_, title in [("node-box", "🤖 [bold]节点流转[/]"), ("tool-box", "🔧 [bold]工具调用[/]")]:
+                    with Vertical(id=id_):
+                        yield Static(title)
+                        yield RichLog(id={"node-box": "node-text", "tool-box": "tool-text"}[id_], markup=True, highlight=True, max_lines=50)
             with Vertical(id="info-panel"):
-                with Vertical(id="workspace-box"):
-                    yield Static("📦 [bold]WORKSPACE[/]")
-                    yield RichLog(id="workspace-text", markup=True, highlight=True, max_lines=50)
-                with Vertical(id="knowledge-box"):
-                    yield Static("📚 [bold]KNOWLEDGE[/]")
-                    yield RichLog(id="knowledge-text", markup=True, highlight=True, max_lines=50)
-                with Vertical(id="memory-box"):
-                    yield Static("🧠 [bold]MEMORY[/]")
-                    yield RichLog(id="memory-text", markup=True, highlight=True, max_lines=50)
+                for id_, title in [("workspace-box", "📦 [bold]WORKSPACE[/]"), ("knowledge-box", "📚 [bold]KNOWLEDGE[/]"), ("memory-box", "🧠 [bold]MEMORY[/]")]:
+                    with Vertical(id=id_):
+                        yield Static(title)
+                        yield RichLog(id={"workspace-box": "workspace-text", "knowledge-box": "knowledge-text", "memory-box": "memory-text"}[id_], markup=True, highlight=True, max_lines=50)
         yield Input(id="input-bar", placeholder="输入 /help 查看命令, /exit 退出")
 
     def on_mount(self) -> None:
         self.title = "AIOps Agent"
         self.sub_title = f"模型: {self._config.model}"
-        self._init_services()
-        self._refresh_workspace()
-        self._refresh_knowledge()
-        self._refresh_memory()
-        self._show_banner()
+        self._init()
+        for fn in [self._show_workspace, self._show_knowledge, self._show_memory, self._show_banner]:
+            fn()
 
     def _show_banner(self):
-        chat = self.query_one("#chat-log", RichLog)
-        chat.write("")
-        chat.write("[bold cyan]╔════════════════════════════════════════╗")
-        chat.write("[bold cyan]║        AIOps Agent v0.4.0[/]       ║")
-        chat.write("[bold cyan]║  输入 /help 查看命令, /exit 退出   ║")
-        chat.write("[bold cyan]╚════════════════════════════════════════╝")
-        chat.write("")
+        c = self.query_one("#chat-log", RichLog)
+        c.write("\n[bold cyan]╔════════════════════════════════════════╗\n║        AIOps Agent v0.4.0[/]       ║\n║  输入 /help 查看命令, /exit 退出   ║\n╚════════════════════════════════════════╝\n")
 
-    def _init_services(self):
-        data_dir = _find_project_root() / ".aiops_data"
+    def _init(self):
+        d = _find_project_root() / ".aiops_data"
         self._workspace_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        self._memory = TieredMemory(
-            llm=self._llm, compaction_enabled=True,
-            working_max_messages=2, working_max_tokens=500,
-            core_persist_path=data_dir / "core_memory.json",
-            episodic_persist_path=data_dir / "workspaces" / self._workspace_id / "episodic_memory.json",
-        )
-
-        configure_shell_approval(handler=self._confirm, mode="inline")
-        configure_file_workspace(data_dir / "workspaces" / self._workspace_id)
-        configure_write_approval(
-            lambda path, preview: self._confirm(f"访问文件({path})", f"workspace 外路径: {preview}")
-        )
-        configure_shell_workspace(data_dir / "workspaces" / self._workspace_id)
-
+        ws = d / "workspaces" / self._workspace_id
+        self._memory = TieredMemory(llm=self._llm, compaction_enabled=True, working_max_messages=2, working_max_tokens=500, core_persist_path=d / "core_memory.json", episodic_persist_path=ws / "episodic_memory.json")
+        cfg_sh_a(handler=self._confirm, mode="inline")
+        cfg_fw(ws)
+        cfg_sh_w(ws)
+        configure_write_approval(lambda p, _: self._confirm(f"访问文件({p})", "workspace 外路径"))
         self._graph = build_complex_graph(self._config, self._llm, self._memory)
-
         from langchain_core.messages import AIMessage, ToolMessage
-        restored: list = []
+        msgs = []
         for m in self._memory.working.get_messages():
-            role = m.get("role")
-            content = m.get("content", "")
-            if role == "user":
-                restored.append(HumanMessage(content=content))
-            elif role == "assistant":
-                restored.append(AIMessage(content=content))
-            elif role == "tool":
-                restored.append(ToolMessage(content=content, tool_call_id=m.get("tool_call_id", ""), name=m.get("name") or None))
+            k = m["role"]
+            if k == "user": msgs.append(HumanMessage(content=m["content"]))
+            elif k == "assistant": msgs.append(AIMessage(content=m["content"]))
+            elif k == "tool": msgs.append(ToolMessage(content=m["content"], tool_call_id=m["tool_call_id"], name=m.get("name")))
+        self._state = AppState(messages=msgs, task="", need_worker=False, todos=[], worker_round=0, intent_route="", intent_reason="", intent_confidence=0.0, chat_response="", session_context="")
 
-        self._state: AppState = {
-            "messages": restored, "task": "", "need_worker": False,
-            "todos": [], "worker_round": 0, "intent_route": "",
-            "intent_reason": "", "intent_confidence": 0.0,
-            "chat_response": "", "session_context": "",
-        }
-
-    def _refresh_workspace(self):
-        w = self.query_one("#workspace-text", RichLog)
-        w.clear()
+    def _show_workspace(self):
+        w = self.query_one("#workspace-text", RichLog); w.clear()
         m = self._config.model
-        short = m.rsplit("/", 1)[-1] if "/" in m else m
-        w.write(f"模型: {short}")
-        w.write(f"工作区: {self._workspace_id}")
+        w.write(f"模型: {m.rsplit('/', 1)[-1] if '/' in m else m}\n工作区: {self._workspace_id}")
 
-    def _refresh_knowledge(self):
-        w = self.query_one("#knowledge-text", RichLog)
-        w.clear()
-        kb_dir = _find_project_root() / "knowledge_base"
-        if kb_dir.exists():
-            files = sorted(kb_dir.glob("*.md"))
-            if files:
-                for f in files:
-                    w.write(f"• {f.stem}")
-            else:
-                w.write("[dim]知识库为空[/]")
+    def _show_knowledge(self):
+        w = self.query_one("#knowledge-text", RichLog); w.clear()
+        kb = _find_project_root() / "knowledge_base"
+        if kb.exists():
+            fs = sorted(kb.glob("*.md"))
+            [w.write(f"• {f.stem}") for f in fs] if fs else w.write("[dim]空[/]")
         else:
-            w.write("[dim]无知识库目录[/]")
+            w.write("[dim]无[/]")
 
-    def _refresh_memory(self):
-        w = self.query_one("#memory-text", RichLog)
-        w.clear()
-        stats = self._memory.get_stats()
-        w.write(f"核心记忆: {stats.get('core_facts', 0)} 条")
-        w.write(f"情景记忆: {stats.get('episodic_count', 0)} 个")
-        w.write(f"工作记忆: {stats.get('working_messages', 0)} 条")
-        facts = self._memory.get_core_facts()
-        if facts:
-            w.write("")
-            w.write("[dim]── 核心 ──[/]")
-            for f in facts[:3]:
-                w.write(f"• {f[:30]}")
+    def _show_memory(self):
+        w = self.query_one("#memory-text", RichLog); w.clear()
+        s = self._memory.get_stats()
+        w.write(f"核心: {s['core_facts']}  情景: {s['episodic_count']}  工作: {s['working_messages']}")
+        for f in self._memory.get_core_facts()[:3]:
+            w.write(f"• {f[:30]}")
 
-    def _refresh_node_text(self):
-        w = self.query_one("#node-text", RichLog)
-        w.clear()
-        if self._node_lines:
-            for line in self._node_lines:
-                w.write(line)
-        else:
-            w.write("等待任务...")
+    def _refresh(self):
+        self.query_one("#node-text", RichLog).clear(); [self.query_one("#node-text", RichLog).write(l) for l in self._node_lines] or self.query_one("#node-text", RichLog).write("等待任务...")
+        self.query_one("#tool-text", RichLog).clear(); [self.query_one("#tool-text", RichLog).write(l) for l in self._tool_lines] or self.query_one("#tool-text", RichLog).write("空闲")
 
-    def _refresh_tool_text(self):
-        w = self.query_one("#tool-text", RichLog)
-        w.clear()
-        if self._tool_lines:
-            for line in self._tool_lines:
-                w.write(line)
-        else:
-            w.write("空闲")
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        raw = event.value.strip()
-        if not raw:
-            return
+    def on_input_submitted(self, e: Input.Submitted) -> None:
+        r = e.value.strip()
+        if not r: return
         self.query_one("#input-bar", Input).clear()
-        if raw.startswith("/"):
-            self._handle_slash_command(raw.lower())
-        else:
-            self._handle_user_input(raw)
+        (self._handle_cmd if r.startswith("/") else self._handle_input)(r.lower() if r.startswith("/") else r)
 
-    def _handle_user_input(self, text: str):
-        chat = self.query_one("#chat-log", RichLog)
-        chat.write("")
-        chat.write(f"[bold cyan]┌─ 🙋 你 ─────────────────────────────────[/]")
-        chat.write(f"[bold cyan]│[/] {text}")
-        chat.write(f"[bold cyan]└──────────────────────────────────────────[/]")
+    def _handle_input(self, text: str):
+        c = self.query_one("#chat-log", RichLog)
+        c.write(f"\n[bold cyan]┌─ 🙋 你 ─────────────────────────────────[/]\n[bold cyan]│[/] {text}\n[bold cyan]└──────────────────────────────────────────[/]")
         self._state["messages"] = list(self._state["messages"]) + [HumanMessage(content=text)]
         self._state["task"] = text
-        self._state["session_context"] = self._build_session_context()
+        self._state["session_context"] = "\n".join(f"[{m.type}]: {str(m.content)[:200]}" for m in self._state["messages"] if hasattr(m, "type") and m.type in ("human", "ai") and m.content)[-6:]
         self.run_graph(text)
 
-    def _build_session_context(self) -> str:
-        lines = []
-        for m in self._state.get("messages", []):
-            if hasattr(m, "type") and m.type in ("human", "ai") and m.content:
-                lines.append(f"[{m.type}]: {str(m.content)[:200]}")
-        return "\n".join(lines[-6:]) if lines else ""
-
-    def _handle_slash_command(self, cmd: str):
-        chat = self.query_one("#chat-log", RichLog)
-        cmd_parts = cmd.split()
-        if cmd in ("/exit", "/quit"):
-            self.exit()
-        elif cmd == "/help":
-            for line in HELP_LINES:
-                chat.write(f"  {line}")
-        elif cmd == "/tools":
-            chat.write(f"[yellow]工具:[/] {', '.join(TOOL_MAP.keys())}")
-        elif cmd == "/memory":
-            stats = self._memory.get_stats()
-            chat.write(f"[dim]记忆:[/] 工作{stats.get('working_messages', 0)}/{stats.get('working_max_messages', 0)} 情景{stats.get('episodic_count', 0)} 核心{stats.get('core_facts', 0)}")
-        elif cmd == "/clear":
-            self._memory.reset(); self._state["messages"] = []
-            chat.clear(); self._node_lines.clear(); self._tool_lines.clear()
-            self._refresh_node_text(); self._refresh_tool_text(); self._refresh_memory()
-            chat.write("[green]✅ 已清空[/]")
-        elif cmd == "/core":
-            facts = self._memory.get_core_facts()
-            if facts:
-                chat.write("[dim]核心:[/]")
-                for i, f in enumerate(facts, 1):
-                    chat.write(f"  {i}. {f}")
-            else:
-                chat.write("  [dim]空[/]")
-        elif cmd == "/config":
-            chat.write(f"  {self._config.llm_provider} | {self._config.model} | {'→'.join(a['name'] for a in ALL_AGENTS)}")
-        elif cmd == "/workspace":
-            chat.write(f"  {self._workspace_id}")
-        else:
-            if cmd_parts[0] == "/remember" and len(cmd_parts) >= 2:
-                self._memory.remember(" ".join(cmd_parts[1:]))
-                self._refresh_memory()
-                chat.write("[green]✅ 已记住[/]")
-            elif cmd_parts[0] == "/forget" and len(cmd_parts) >= 2:
-                if self._memory.forget(" ".join(cmd_parts[1:])):
-                    self._refresh_memory()
-                    chat.write("[green]✅ 已忘记[/]")
-                else:
-                    chat.write("[yellow]⚠️ 未找到[/]")
-            else:
-                chat.write(f"[yellow]未知: {cmd}[/]")
+    def _handle_cmd(self, cmd: str):
+        c = self.query_one("#chat-log", RichLog); p = cmd.split()
+        if cmd in ("/exit", "/quit"): self.exit(); return
+        if cmd == "/help": [c.write(f"  {l}") for l in ["可用命令:", "  [b]/help[/b] 帮助", "  [b]/exit[/b] 退出", "  [b]/tools[/b] 工具", "  [b]/memory[/b] 记忆", "  [b]/workspace[/b] 工作区", "  [b]/remember <事实>[/b] 记住", "  [b]/forget <事实>[/b] 忘记", "  [b]/core[/b] 核心记忆", "  [b]/clear[/b] 清空", "  [b]/config[/b] 配置"]]; return
+        if cmd == "/tools": c.write(f"[yellow]工具:[/] {', '.join(TOOL_MAP.keys())}"); return
+        if cmd == "/memory":
+            s = self._memory.get_stats(); c.write(f"[dim]记忆:[/]  工作{s['working_messages']}/{s['working_max_messages']}  情景{s['episodic_count']}  核心{s['core_facts']}"); return
+        if cmd == "/clear":
+            self._memory.reset(); self._state["messages"] = []; self.query_one("#chat-log", RichLog).clear()
+            self._node_lines.clear(); self._tool_lines.clear(); self._refresh(); self._show_memory(); c.write("[green]✅ 已清空[/]"); return
+        if cmd == "/core":
+            fs = self._memory.get_core_facts()
+            [c.write(f"  {i}. {f}") for i, f in enumerate(fs, 1)] if fs else c.write("  [dim]空[/]"); return
+        if cmd == "/config": c.write(f"  {self._config.llm_provider} | {self._config.model} | {'→'.join(a['name'] for a in ALL_AGENTS)}"); return
+        if cmd == "/workspace": c.write(f"  {self._workspace_id}"); return
+        if p[0] == "/remember" and len(p) >= 2:
+            self._memory.remember(" ".join(p[1:])); self._show_memory(); c.write("[green]✅ 已记住[/]"); return
+        if p[0] == "/forget" and len(p) >= 2:
+            c.write("[green]✅ 已忘记[/]" if self._memory.forget(" ".join(p[1:])) else "[yellow]⚠️ 未找到[/]"); self._show_memory(); return
+        c.write(f"[yellow]未知: {cmd}[/]")
 
     @work(thread=True)
-    def run_graph(self, user_input: str) -> None:
+    def run_graph(self, inp: str) -> None:
         try:
-            for mode, event in self._graph.stream(self._state, stream_mode=["updates", "custom"]):
-                if mode == "custom":
-                    self.call_from_thread(self._on_custom_event, event)
-                elif mode == "updates":
-                    self.call_from_thread(self._on_updates_event, event)
-            self._memory.add_message({"role": "user", "content": user_input})
-            self.call_from_thread(self._refresh_memory)
+            for mode, ev in self._graph.stream(self._state, stream_mode=["updates", "custom"]):
+                self.call_from_thread(self._on_custom_event if mode == "custom" else self._on_updates, ev)
+            self._memory.add_message({"role": "user", "content": inp})
+            self.call_from_thread(self._show_memory)
         except Exception as e:
-            self.call_from_thread(self._show_error, str(e), traceback.format_exc())
+            self.call_from_thread(lambda: self.query_one("#chat-log", RichLog).write(f"[red]❌ {e}[/]"))
 
-    def _on_custom_event(self, event: dict):
-        t = event.get("type")
+    def _on_custom_event(self, ev: dict):
+        t = ev["type"]
         if t == "agent_start":
-            name = event["agent"]
-            if self._node_lines and name in self._node_lines[-1]:
-                return
-            self._node_lines.append(f"▸ {name}")
-            self._refresh_node_text()
+            n = ev["agent"]
+            if not (self._node_lines and n in self._node_lines[-1]):
+                self._node_lines.append(f"▸ {n}"); self._refresh()
         elif t == "agent_end":
-            name = event.get("agent", "")
+            n = ev["agent"]
             for i in range(len(self._node_lines)-1, -1, -1):
-                if name in self._node_lines[i] and "▸" in self._node_lines[i]:
-                    self._node_lines[i] = self._node_lines[i].replace("▸", "✓")
-                    break
-            self._refresh_node_text()
+                if n in self._node_lines[i] and "▸" in self._node_lines[i]:
+                    self._node_lines[i] = self._node_lines[i].replace("▸", "✓"); break
+            self._refresh()
         elif t == "tool_start":
-            name = event["tool"]
-            self._tool_lines.append(f"▸ {name}")
-            self._refresh_tool_text()
+            self._tool_lines.append(f"▸ {ev['tool']}"); self._refresh()
         elif t == "tool_result":
-            name = event.get("tool", "")
+            n = ev["tool"]
             for i in range(len(self._tool_lines)-1, -1, -1):
-                if name in self._tool_lines[i] and "▸" in self._tool_lines[i]:
-                    self._tool_lines[i] = self._tool_lines[i].replace("▸", "✓")
-                    break
-            self._refresh_tool_text()
-            error = event.get("error", "")
-            output = event.get("output", "")
-            if error:
-                self.query_one("#chat-log", RichLog).write(f"  [red]✗ {error}[/]")
-            if output:
-                d = output[:120].replace("\n", " ")
-                self.query_one("#chat-log", RichLog).write(f"  [dim]{d}[/]")
+                if n in self._tool_lines[i] and "▸" in self._tool_lines[i]:
+                    self._tool_lines[i] = self._tool_lines[i].replace("▸", "✓"); break
+            self._refresh()
+            if ev.get("error"): self.query_one("#chat-log", RichLog).write(f"  [red]✗ {ev['error']}[/]")
+            if ev.get("output"): self.query_one("#chat-log", RichLog).write(f"  [dim]{ev['output'][:120].replace(chr(10),' ')}[/]")
 
-    def _on_updates_event(self, event: dict):
-        chat = self.query_one("#chat-log", RichLog)
-        for data in event.values():
-            resp = data.get("chat_response", "")
-            if resp:
-                chat.write(f"\n[bold green]┌─ 🤖 AI ───────────────────────────────────[/]")
-                chat.write(f"[bold green]│[/] {resp}")
-                chat.write(f"[bold green]└──────────────────────────────────────────[/]")
-            for msg in data.get("messages", []):
-                if hasattr(msg, "type") and msg.type == "ai" and msg.content:
-                    chat.write(f"\n[bold green]┌─ 🤖 AI ───────────────────────────────────[/]")
-                    chat.write(f"[bold green]│[/] {msg.content}")
-                    chat.write(f"[bold green]└──────────────────────────────────────────[/]")
+    def _on_updates(self, ev: dict):
+        c = self.query_one("#chat-log", RichLog)
+        for d in ev.values():
+            for msg in d.get("messages", []):
+                if getattr(msg, "type", "") == "ai" and msg.content:
+                    c.write(f"\n[bold green]┌─ 🤖 AI ───────────────────────────────────[/]\n[bold green]│[/] {msg.content}\n[bold green]└──────────────────────────────────────────[/]")
 
-    def _show_error(self, msg: str, tb: str):
-        chat = self.query_one("#chat-log", RichLog)
-        chat.write(f"[red]❌ {msg}[/]")
-
-    def _confirm(self, command: str, reason: str) -> bool:
-        future: asyncio.Future[bool] = asyncio.Future()
-        self.call_from_thread(self._push_confirm_screen, command, reason, future)
-        return asyncio.run(future)
-
-    def _push_confirm_screen(self, command: str, reason: str, future: asyncio.Future):
-        def on_result(result: bool | None):
-            future.set_result(result or False)
-        self.push_screen(ConfirmScreen(command, reason), on_result)
+    def _confirm(self, cmd: str, reason: str) -> bool:
+        f: asyncio.Future[bool] = asyncio.Future()
+        def done(r):
+            f.set_result(r or False)
+        self.call_from_thread(lambda: self.push_screen(ConfirmScreen(cmd, reason), done))
+        return asyncio.run(f)

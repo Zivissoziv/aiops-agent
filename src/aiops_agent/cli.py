@@ -1,17 +1,10 @@
-# d:\workspace\aiops-agent\src\aiops_agent\cli.py
-"""CLI — TUI 应用入口，启动 Textual TUI。"""
-
+"""CLI — TUI 应用入口。"""
 from .config import Config
 from .core.tui_app import AiOpsTUI
 
-
 def main() -> None:
     config = Config.from_env()
-    errors = config.validate()
-    if errors:
-        for err in errors:
-            print(f"❌ {err}")
-        exit(1)
-
-    app = AiOpsTUI(config=config)
-    app.run()
+    for err in config.validate():
+        print(f"❌ {err}")
+    if config.validate(): exit(1)
+    AiOpsTUI(config=config).run()
